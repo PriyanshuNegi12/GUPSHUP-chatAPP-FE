@@ -88,6 +88,12 @@ export async function startCall({ peerUserId, conversationId, callType, peerInfo
 
 export async function acceptIncomingCall(incoming) {
   const socket = getSocket();
+  // Candidates from the caller can arrive while we're still on the ringing
+  // screen (pc is null, so they land in pendingCandidates). resetPeer()
+  // below wipes that array, so grab a reference to it first and flush THAT
+  // copy after setRemoteDescription — otherwise every early candidate is
+  // silently discarded and ICE never connects on this side.
+  const queuedCandidates = pendingCandidates;
   resetPeer();
 
   try {
@@ -103,7 +109,7 @@ export async function acceptIncomingCall(incoming) {
   localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
 
   await pc.setRemoteDescription(new RTCSessionDescription(incoming.offer));
-  for (const c of pendingCandidates) {
+  for (const c of queuedCandidates) {
     await pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
   }
   pendingCandidates = [];
