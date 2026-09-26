@@ -21,6 +21,7 @@ export default function CallManager() {
 
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
+  const [swapped, setSwapped] = useState(false); // false: remote big / local PiP
 
   // FIX: DOM nodes are tracked in state via callback refs instead of
   // useRef. A plain useRef doesn't trigger a re-render when the node
@@ -46,6 +47,7 @@ export default function CallManager() {
     setCameraOff(false);
     setLocalStream(null);
     setRemoteStream(null);
+    setSwapped(false);
   };
 
   // ---- signaling + call-manager event wiring ----
@@ -222,7 +224,12 @@ export default function CallManager() {
                   ref={remoteVideoRef}
                   autoPlay
                   playsInline
-                  className="absolute inset-0 w-full h-full object-cover bg-black"
+                  onClick={swapped ? () => setSwapped(false) : undefined}
+                  className={
+                    swapped
+                      ? "absolute top-4 right-4 w-24 h-32 sm:w-28 sm:h-36 rounded-xl object-cover border-2 border-white/40 shadow-lg bg-black z-10 cursor-pointer transition-transform duration-150 hover:scale-105"
+                      : "absolute inset-0 w-full h-full object-cover bg-black"
+                  }
                 />
               ) : (
                 <div className="absolute inset-0 flex flex-col items-center justify-center bg-black">
@@ -253,7 +260,12 @@ export default function CallManager() {
                   autoPlay
                   playsInline
                   muted
-                  className="absolute top-4 right-4 w-24 h-32 sm:w-28 sm:h-36 rounded-xl object-cover border-2 border-white/40 shadow-lg bg-black z-10"
+                  onClick={swapped ? undefined : () => setSwapped(true)}
+                  className={
+                    swapped
+                      ? "absolute inset-0 w-full h-full object-cover bg-black"
+                      : "absolute top-4 right-4 w-24 h-32 sm:w-28 sm:h-36 rounded-xl object-cover border-2 border-white/40 shadow-lg bg-black z-10 cursor-pointer transition-transform duration-150 hover:scale-105"
+                  }
                 />
               )}
               {!showingVideo && inCallUI && (
