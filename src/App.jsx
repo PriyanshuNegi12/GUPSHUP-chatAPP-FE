@@ -11,7 +11,7 @@ import {
   setOnlineList, setUserOnline, setUserOffline,
 } from "./utils/friendSlice";
 import { connectSocket, disconnectSocket, getSocket } from "./utils/socket";
-import CallManager from "./components/CallManager";
+import CallManager from "./components/callManager";
 
 import LoginPage from "./Pages/LoginPage";
 import SignupPage from "./Pages/SignupPage";
