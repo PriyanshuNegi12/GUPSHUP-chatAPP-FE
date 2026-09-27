@@ -4,7 +4,7 @@ import MobileHeader from "../components/MobileHeader";
 
 export default function Layout() {
   return (
-    <div className="h-screen w-screen overflow-hidden bg-[#f3ead8] flex">
+    <div className="h-dvh w-screen overflow-hidden bg-[#f3ead8] flex">
       {/* desktop/tablet rail, hidden on mobile */}
       <Rail />
 

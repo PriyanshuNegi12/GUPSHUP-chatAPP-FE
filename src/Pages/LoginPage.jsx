@@ -89,7 +89,7 @@ export default function LoginPage() {
   const serverErrorMessage = formTouched ? '' : getAuthErrorMessage(error);
 
   return (
-    <div className="relative min-h-screen w-full overflow-hidden bg-[#f3ead8] flex items-center justify-center font-body px-4 py-8 sm:px-6">
+    <div className="relative h-dvh w-full overflow-hidden bg-[#f3ead8] flex items-center justify-center font-body px-4 py-8 sm:px-6">
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;700;800&display=swap');
       `}</style>
@@ -109,7 +109,7 @@ export default function LoginPage() {
         style={{ background: 'linear-gradient(100deg, rgba(255,255,255,0.95) 0%, rgba(255,255,255,0) 55%)' }}
       />
 
-      <div className="relative z-10 w-full max-w-100 rounded-[28px] sm:rounded-[34px] border border-[#e9ddc4] bg-[#faf5e9] px-6 py-8 sm:px-9 sm:pt-10 sm:pb-8 shadow-[0_30px_50px_-18px_rgba(120,85,35,0.4)] overflow-hidden">
+      <div className="relative z-10 w-full max-w-100 max-h-full overflow-y-auto rounded-[28px] sm:rounded-[34px] border border-[#e9ddc4] bg-[#faf5e9] px-6 py-8 sm:px-9 sm:pt-10 sm:pb-8 shadow-[0_30px_50px_-18px_rgba(120,85,35,0.4)]">
         <CardFoliage />
 
         <div className="relative flex items-center justify-center gap-3 sm:gap-4 mb-5 sm:mb-6">

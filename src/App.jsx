@@ -127,7 +127,7 @@ function App() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[#f3ead8]">
+      <div className="h-dvh flex items-center justify-center bg-[#f3ead8]">
         <span className="loading loading-spinner loading-lg"></span>
       </div>
     );

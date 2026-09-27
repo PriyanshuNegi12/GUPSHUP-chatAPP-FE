@@ -383,8 +383,9 @@ export default function ChatWindow() {
           35%           { transform: translateY(-5px) scale(1.08); opacity: 1;    }
         }
         @keyframes messagePop {
-          0%   { opacity: 0; transform: translateY(8px) scale(0.97); }
-          100% { opacity: 1; transform: translateY(0)    scale(1);   }
+          0%   { opacity: 0; transform: translateY(28px) scale(0.96); }
+          60%  { opacity: 1; transform: translateY(-2px)  scale(1.01); }
+          100% { opacity: 1; transform: translateY(0)     scale(1);    }
         }
         @keyframes scrollPillIn {
           0%   { opacity: 0; transform: translate(-50%, 10px) scale(0.9); }
@@ -595,7 +596,7 @@ export default function ChatWindow() {
                   onTouchMove={cancelLongPress}
                   onTouchCancel={cancelLongPress}
                   style={{
-                    animation: "messagePop 0.2s ease-out",
+                    animation: "messagePop 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.1)",
                     background: m.deleted ? "#f1ece0" : "#ffffff",
                     boxShadow: mine
                       ? "0 2px 8px -2px rgba(138,85,39,0.18)"

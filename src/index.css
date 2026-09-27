@@ -1,2 +1,9 @@
 @import "tailwindcss";
 @plugin "daisyui";
+
+html, body, #root {
+  height: 100%;
+  /* stops the page itself from ever scrolling — only the specific
+     regions inside the app (message list, chat list, etc.) should */
+  overflow: hidden;
+}
