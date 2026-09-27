@@ -27,6 +27,47 @@ const otpSchema = z.object({
 
 const DEBOUNCE_MS = 1000;
 
+// common providers we can confidently suggest a correction against —
+// intentionally NOT exhaustive; the goal is catching obvious typos like
+// "gmai.cop", not guessing at someone's genuine custom/work domain
+const COMMON_EMAIL_DOMAINS = [
+  'gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'icloud.com',
+  'live.com', 'aol.com', 'protonmail.com', 'rediffmail.com', 'yandex.com',
+];
+
+function levenshtein(a, b) {
+  const dp = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
+  for (let i = 0; i <= a.length; i++) dp[i][0] = i;
+  for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1]
+        : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[a.length][b.length];
+}
+
+// returns a suggested domain (e.g. "gmail.com") if the typed domain looks
+// like a near-miss typo of a common provider, otherwise null
+function suggestEmailDomain(email) {
+  const at = email.lastIndexOf('@');
+  if (at === -1) return null;
+  const domain = email.slice(at + 1).trim().toLowerCase();
+  if (!domain || COMMON_EMAIL_DOMAINS.includes(domain)) return null;
+
+  let best = null;
+  let bestDist = Infinity;
+  for (const candidate of COMMON_EMAIL_DOMAINS) {
+    const dist = levenshtein(domain, candidate);
+    if (dist < bestDist) { bestDist = dist; best = candidate; }
+  }
+  // only flag close typos (1-2 char difference) — anything further apart
+  // is more likely a real, different domain than a mistyped common one
+  return best && bestDist > 0 && bestDist <= 2 ? best : null;
+}
+
 function getAuthErrorMessage(err) {
   if (!err) return '';
   const message = typeof err === 'string' ? err : err.message || err.error || '';
@@ -42,7 +83,7 @@ function getAuthErrorMessage(err) {
       ? `Please ${message.match(/wait \d+ seconds/i)[0]} before trying again.`
       : 'Too many attempts. Please wait a moment and try again.';
   }
-  if (/network|failed to fetch|timeout|ECONNREFUSED|500|502|503/i.test(message)) {
+  if (/network|failed to fetch|timeout|ECONNREFUSED|ENETUNREACH|ENOTFOUND|EAI_AGAIN|ECONNRESET|500|502|503/i.test(message)) {
     return 'Unable to reach the server right now. Please try again in a moment.';
   }
   return message || 'Something went wrong. Please try again.';
@@ -86,6 +127,7 @@ export default function SignupPage() {
   // 'idle' | 'checking' | 'available' | 'taken'
   const [usernameStatus, setUsernameStatus] = useState('idle');
   const [emailStatus, setEmailStatus] = useState('idle');
+  const [emailSuggestion, setEmailSuggestion] = useState(null); // e.g. "gmail.com" when a typo looks likely
 
   const usernameTimer = useRef(null);
   const emailTimer = useRef(null);
@@ -97,7 +139,7 @@ export default function SignupPage() {
   const navigate = useNavigate();
   const { isAuthenticated, loading, error } = useSelector((state) => state.auth);
 
-  const detailsForm = useForm({ resolver: zodResolver(detailsSchema) });
+  const detailsForm = useForm({ resolver: zodResolver(detailsSchema), mode: 'onChange' });
   const otpForm = useForm({ resolver: zodResolver(otpSchema) });
 
   useEffect(() => {
@@ -142,9 +184,11 @@ export default function SignupPage() {
     const valid = z.string().email().safeParse(value).success;
     if (!valid) {
       setEmailStatus('idle');
+      setEmailSuggestion(null);
       return;
     }
 
+    setEmailSuggestion(suggestEmailDomain(value));
     setEmailStatus('checking');
     const thisRequest = ++emailRequestId.current;
 
@@ -273,8 +317,9 @@ export default function SignupPage() {
             <div>
               <label className="flex items-center gap-3 h-12 sm:h-13 px-4 sm:px-5 rounded-full border-[1.5px] border-[#3b2e22] bg-[#faf5e9]">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#3b2e22" strokeWidth="1.8" className="shrink-0">
-                  <path d="M4 6h16v12H4z" />
-                  <path d="M4 7l8 6 8-6" />
+                  <circle cx="12" cy="12" r="9" />
+                  <circle cx="12" cy="12" r="3.4" />
+                  <path d="M15.4 12v1.4a2.6 2.6 0 0 0 5.1.7 9 9 0 1 0-3.4 6.1" strokeLinecap="round" />
                 </svg>
                 <input
                   {...detailsForm.register('username', {
@@ -315,6 +360,20 @@ export default function SignupPage() {
                 <p className="text-[12px] sm:text-[12.5px] text-[#8a2f2f] mt-1 ml-4 sm:ml-5">
                   {detailsForm.formState.errors.emailId.message}
                 </p>
+              ) : emailSuggestion ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const current = detailsForm.getValues('emailId');
+                    const at = current.lastIndexOf('@');
+                    const fixed = `${current.slice(0, at)}@${emailSuggestion}`;
+                    detailsForm.setValue('emailId', fixed, { shouldValidate: true });
+                    checkEmail(fixed);
+                  }}
+                  className="text-[12px] sm:text-[12.5px] text-[#8a5527] mt-1 ml-4 sm:ml-5 underline decoration-dotted cursor-pointer hover:text-[#6b4018]"
+                >
+                  Did you mean {emailSuggestion}?
+                </button>
               ) : (
                 <AvailabilityHint status={emailStatus} />
               )}
@@ -353,7 +412,12 @@ export default function SignupPage() {
 
             <button
               type="submit"
-              disabled={loading || usernameStatus === 'checking' || emailStatus === 'checking'}
+              disabled={
+                loading ||
+                usernameStatus === 'checking' || emailStatus === 'checking' ||
+                usernameStatus === 'taken' || emailStatus === 'taken' ||
+                Object.keys(detailsForm.formState.errors).length > 0
+              }
               className="w-full h-12 sm:h-13 rounded-full text-[15px] sm:text-[16px] font-medium text-[#f3e8d6] mt-1 cursor-pointer transition-all duration-150 ease-out hover:scale-105 hover:brightness-110 active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100 disabled:hover:brightness-100"
               style={{
                 background: 'linear-gradient(180deg, #b97a45 0%, #8a5527 100%)',
