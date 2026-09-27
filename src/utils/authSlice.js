@@ -97,10 +97,11 @@ const authSlice = createSlice({
   initialState: {
     user: null,
     isAuthenticated: false,
-    loading: false,
+    loading: false,        // drives register/login/logout button + spinner state
+    checkingAuth: true,    // NEW — only true during the initial checkAuth() on app boot
     error: null,
 
-    profileLoading: false, // NEW: separate from `loading` so login/signup spinners aren't affected
+    profileLoading: false, // separate from `loading` so login/signup spinners aren't affected
     profileError: null,
     profileSaving: false,
   },
@@ -141,17 +142,22 @@ const authSlice = createSlice({
         state.user = null;
       })
 
+      // NOTE: checkAuth now uses `checkingAuth`, NOT `loading` —
+      // this is the fix. `loading` used to be shared here, which meant
+      // App.jsx's top-level spinner gate (driven by `loading`) would
+      // also fire during registerUser/loginUser requests, unmounting
+      // whatever page was showing (e.g. SignupPage) mid-request.
       .addCase(checkAuth.pending, (state) => {
-        state.loading = true;
+        state.checkingAuth = true;
         state.error = null;
       })
       .addCase(checkAuth.fulfilled, (state, action) => {
-        state.loading = false;
+        state.checkingAuth = false;
         state.isAuthenticated = !!action.payload;
         state.user = action.payload;
       })
       .addCase(checkAuth.rejected, (state, action) => {
-        state.loading = false;
+        state.checkingAuth = false;
         state.error = action.payload || null;
         state.isAuthenticated = false;
         state.user = null;
@@ -174,7 +180,7 @@ const authSlice = createSlice({
         state.user = null;
       })
 
-      // NEW: merge the full profile into `user`, so avatar/bio become
+      // merge the full profile into `user`, so avatar/bio become
       // available anywhere `state.auth.user` is already read (Rail, MobileHeader)
       .addCase(fetchProfile.pending, (state) => {
         state.profileLoading = true;

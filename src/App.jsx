@@ -27,7 +27,10 @@ import AboutPage from "./Pages/AboutPage";
 
 function App() {
   const dispatch = useDispatch();
-  const { isAuthenticated, user, loading } = useSelector((state) => state.auth);
+  // NOTE: read `checkingAuth`, NOT `loading` — `loading` also flips true
+  // during registerUser/loginUser requests, which used to unmount the
+  // whole <Routes> tree (and SignupPage with it) mid-signup.
+  const { isAuthenticated, user, checkingAuth } = useSelector((state) => state.auth);
 
   useEffect(() => {
     dispatch(checkAuth());
@@ -72,7 +75,7 @@ function App() {
       dispatch(fetchReceivedRequests());
       dispatch(fetchSentRequests());
       dispatch(fetchFriends());
-      // NEW: friend status changes (accept/block/unblock/remove) all affect
+      // friend status changes (accept/block/unblock/remove) all affect
       // whether a direct chat's canSend is true — without this, a stale
       // canSend:false from an earlier block sticks around forever, even
       // after you're friends again, until a full page refresh
@@ -125,7 +128,7 @@ function App() {
     if (!isAuthenticated) dispatch(resetChatState());
   }, [isAuthenticated, dispatch]);
 
-  if (loading) {
+  if (checkingAuth) {
     return (
       <div className="h-dvh flex items-center justify-center bg-[#f3ead8]">
         <span className="loading loading-spinner loading-lg"></span>
