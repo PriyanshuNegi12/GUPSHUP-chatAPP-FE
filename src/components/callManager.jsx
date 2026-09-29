@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { useSelector } from "react-redux";
 import { getSocket } from "../utils/socket";
 import * as callManager from "../utils/callManager";
+
+const RINGTONE_SRC = "/whatsapp_ringtone.mp3"; // lives in /public
 
 function formatDuration(s) {
   const m = Math.floor(s / 60).toString().padStart(2, "0");
@@ -18,6 +21,8 @@ const FAIL_MESSAGES = {
 };
 
 export default function CallManager() {
+  const isAuthenticated = useSelector((state) => state.auth.isAuthenticated);
+
   // idle | initiating | ringing-outgoing | ringing-incoming | connecting |
   // connected | reconnecting | ended | failed
   const [status, setStatus] = useState("idle");
@@ -47,8 +52,12 @@ export default function CallManager() {
   // mount-only effect below never read stale values.
   const statusRef = useRef("idle");
   const peerUserIdRef = useRef(null);
+  const incomingRef = useRef(null);
+  const ringtoneRef = useRef(null);
+  const notificationRef = useRef(null);
   useEffect(() => { statusRef.current = status; }, [status]);
   useEffect(() => { peerUserIdRef.current = peerUserId; }, [peerUserId]);
+  useEffect(() => { incomingRef.current = incoming; }, [incoming]);
 
   const resetLocal = () => {
     setStatus("idle");
@@ -64,6 +73,127 @@ export default function CallManager() {
     setFailReason("");
     setNote("");
   };
+
+  // ---------- ringtone helpers ----------
+  const getRingtone = () => {
+    if (!ringtoneRef.current) {
+      const a = new Audio(RINGTONE_SRC);
+      a.loop = true;
+      a.preload = "auto";
+      ringtoneRef.current = a;
+    }
+    return ringtoneRef.current;
+  };
+
+  const startRingtone = () => {
+    const a = getRingtone();
+    a.muted = false;
+    a.currentTime = 0;
+    a.play().catch((err) => console.warn("ringtone blocked (no user interaction yet):", err.message));
+  };
+
+  const stopRingtone = () => {
+    const a = ringtoneRef.current;
+    if (!a) return;
+    a.pause();
+    a.currentTime = 0;
+  };
+
+  // Browsers block audio until the user has interacted with the page. On the
+  // first click/tap/key we "unlock" the audio element (play muted, then pause)
+  // and ask for notification permission (needs a user gesture on some browsers).
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    const unlock = () => {
+      const a = getRingtone();
+      a.muted = true;
+      a.play()
+        .then(() => {
+          a.pause();
+          a.currentTime = 0;
+          a.muted = false;
+        })
+        .catch(() => { a.muted = false; });
+
+      if (typeof Notification !== "undefined" && Notification.permission === "default") {
+        Notification.requestPermission().catch(() => {});
+      }
+
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+
+    window.addEventListener("pointerdown", unlock);
+    window.addEventListener("keydown", unlock);
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, [isAuthenticated]);
+
+  // Ring + tab title + system notification while an incoming call is pending.
+  // Cleanup runs on ANY status change (accepted, rejected, cancelled, timed
+  // out), so the ringtone always stops.
+  useEffect(() => {
+    if (status !== "ringing-incoming") return;
+
+    startRingtone();
+
+    const name = peerInfo?.firstname || peerInfo?.username || "Someone";
+    const originalTitle = document.title;
+    let titleTimer = null;
+
+    if (document.hidden) {
+      let on = true;
+      titleTimer = setInterval(() => {
+        document.title = on ? `📞 ${name} is calling…` : originalTitle;
+        on = !on;
+      }, 1000);
+
+      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+        try {
+          const n = new Notification(`${name} is calling…`, {
+            body: `Incoming ${callType} call`,
+            icon: peerInfo?.avatar || "/logo.png",
+            tag: "incoming-call",
+            requireInteraction: true, // stays until dismissed (desktop Chrome/Edge)
+          });
+          n.onclick = () => {
+            window.focus();
+            n.close();
+          };
+          notificationRef.current = n;
+        } catch (err) {
+          // Android Chrome doesn't allow `new Notification()` — needs a service worker
+          console.warn("Notification failed:", err.message);
+        }
+      }
+    }
+
+    return () => {
+      stopRingtone();
+      if (titleTimer) clearInterval(titleTimer);
+      document.title = originalTitle;
+      notificationRef.current?.close();
+      notificationRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status]);
+
+  // Stop the ringtone if the component ever unmounts
+  useEffect(() => () => stopRingtone(), []);
+
+  // ---------- end / decline any call on logout ----------
+  // This effect lives in a child of <App>, so it runs BEFORE App's own effect
+  // that calls disconnectSocket() — meaning the "call:end" still reaches the peer.
+  useEffect(() => {
+    if (isAuthenticated) return;
+    if (incomingRef.current) callManager.rejectIncomingCall(incomingRef.current);
+    callManager.hangUpOnLogout();
+    resetLocal();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated]);
 
   // ---- signaling + call-manager event wiring ----
   useEffect(() => {
@@ -84,7 +214,7 @@ export default function CallManager() {
     const onAnswer = (payload) => callManager.handleRemoteAnswer(payload.answer);
     const onIce = (payload) => callManager.handleRemoteIceCandidate(payload.candidate);
 
-    // FIX: these now check the event is actually about the CURRENT call —
+    // These check the event is actually about the CURRENT call —
     // a stale call:ended from a previous call could otherwise wipe out a
     // call you've since started with someone else.
     const onRejected = (payload) => {
@@ -134,8 +264,6 @@ export default function CallManager() {
         setFailReason(FAIL_MESSAGES[event.reason] || "Couldn't start the call.");
         setStatus("failed");
       } else if (event.type === "connection-lost") {
-        // FIX: this used to just reset local UI state, leaving the peer
-        // connection, camera/mic and the server's callpeer record alive.
         // endCall() properly tears everything down and notifies the peer.
         callManager.endCall(peerUserIdRef.current);
       }
@@ -209,10 +337,12 @@ export default function CallManager() {
 
   const handleAccept = async () => {
     const payload = incoming;
+    stopRingtone();
     setIncoming(null);
     await callManager.acceptIncomingCall(payload);
   };
   const handleReject = () => {
+    stopRingtone();
     if (incoming) callManager.rejectIncomingCall(incoming);
     resetLocal();
   };

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router";
 import { useDispatch, useSelector } from "react-redux";
 import {
@@ -125,6 +125,7 @@ export default function ChatWindow() {
   const headerMenuRef = useRef(null);
   const inputRef = useRef(null);
   const isNearBottomRef = useRef(true);
+  const prevScrollHeightRef = useRef(null); // used to keep position when older messages are prepended
 
   const messages = bucket?.items || [];
   const hasMore = bucket?.hasMore ?? true;
@@ -145,6 +146,7 @@ export default function ChatWindow() {
     if (!conversationId) return;
 
     isNearBottomRef.current = true;
+    prevScrollHeightRef.current = null;
     setShowScrollDown(false);
 
     dispatch(setActiveConversation(conversationId));
@@ -187,6 +189,16 @@ export default function ChatWindow() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId]);
 
+  // After older messages are prepended, restore the scroll position so the view doesn't jump.
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (el && prevScrollHeightRef.current != null && !loading) {
+      el.scrollTop += el.scrollHeight - prevScrollHeightRef.current;
+      prevScrollHeightRef.current = null;
+    }
+  }, [messages.length, loading]);
+
+  // Auto-scroll to bottom for new messages / typing indicator.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -248,6 +260,7 @@ export default function ChatWindow() {
 
   const loadOlder = () => {
     if (loading || !hasMore || messages.length === 0) return;
+    prevScrollHeightRef.current = scrollRef.current?.scrollHeight ?? null;
     const oldest = messages[messages.length - 1];
     dispatch(fetchMessages({ conversationId, before: oldest.createdAt }));
   };
@@ -382,7 +395,7 @@ export default function ChatWindow() {
   });
 
   return (
-    <div className="flex flex-col h-full w-full relative">
+    <div className="flex flex-col h-full min-h-0 w-full relative">
       <style>{`
         @keyframes typingBounce {
           0%, 70%, 100% { transform: translateY(0)    scale(0.9);  opacity: 0.35; }
@@ -533,15 +546,15 @@ export default function ChatWindow() {
       </div>
 
       {/* ---------- messages ---------- */}
+      {/* Outer wrapper: bounded height + background + fixed blobs. The scroller sits on top. */}
       <div
-        ref={scrollRef}
-        onScroll={handleScroll}
-        className="flex-1 overflow-y-auto px-3 sm:px-6 py-5 flex flex-col justify-end relative"
+        className="relative flex-1 min-h-0"
         style={{
           background:
             "radial-gradient(circle at 1px 1px, rgba(138,85,39,0.05) 1px, transparent 0) 0 0/22px 22px, linear-gradient(180deg, #f6efdd 0%, #f3ead8 100%)",
         }}
       >
+        {/* Blobs: sibling of the scroller, so they stay fixed while messages scroll */}
         <div className="pointer-events-none absolute inset-0 overflow-hidden z-0" aria-hidden="true">
           <div
             className="absolute w-96 h-96 rounded-full opacity-[0.32] blur-3xl"
@@ -569,78 +582,91 @@ export default function ChatWindow() {
           />
         </div>
 
-        <div className="relative z-10 flex flex-col gap-0.5 max-w-[94%] sm:max-w-[94%] lg:max-w-[94%] mx-auto w-full">
-          {loading && messages.length === 0 && (
-            <div className="flex flex-col items-center justify-center gap-2 mt-6">
-              <span className="loading loading-spinner loading-sm text-[#8a5527]"></span>
-              <p className="text-center text-[13px] text-[#6b6257]">Loading messages...</p>
-            </div>
-          )}
+        {/* Scroller: NO justify-end (that clips older messages). Inner wrapper uses mt-auto instead. */}
+        <div
+          ref={scrollRef}
+          onScroll={handleScroll}
+          className="absolute inset-0 overflow-y-auto px-3 sm:px-6 py-5 flex flex-col z-10"
+        >
+          <div className="flex flex-col gap-0.5 max-w-[94%] mx-auto w-full mt-auto">
+            {loading && messages.length > 0 && (
+              <div className="flex justify-center py-2">
+                <span className="loading loading-spinner loading-xs text-[#8a5527]"></span>
+              </div>
+            )}
 
-          {groupedByDay.map((item) => {
-            if (item.type === "separator") {
-              return (
-                <div key={item.key} className="flex items-center justify-center my-4">
-                  <span className="px-3.5 py-1 rounded-full bg-white/70 backdrop-blur-sm text-[12px] font-medium text-[#6b6257] shadow-sm border border-[#e9ddc4]/50">
-                    {item.label}
-                  </span>
-                </div>
-              );
-            }
+            {loading && messages.length === 0 && (
+              <div className="flex flex-col items-center justify-center gap-2 mt-6">
+                <span className="loading loading-spinner loading-sm text-[#8a5527]"></span>
+                <p className="text-center text-[13px] text-[#6b6257]">Loading messages...</p>
+              </div>
+            )}
 
-            const m = item.message;
-            const mine = m.sender === meId;
-            const tickStatus = mine && !m.deleted ? getTickStatus(m, progress, meId) : null;
-
-            return (
-              <div key={item.key} className={`flex ${mine ? "justify-end" : "justify-start"} mb-1`}>
-                <div
-                  onContextMenu={(e) => openContextMenu(e, m._id, mine, m.deleted)}
-                  onTouchStart={(e) => startLongPress(e, m._id, mine, m.deleted)}
-                  onTouchEnd={cancelLongPress}
-                  onTouchMove={cancelLongPress}
-                  onTouchCancel={cancelLongPress}
-                  style={{
-                    animation: "messagePop 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.1)",
-                    background: m.deleted
-                      ? "#f1ece0"
-                      : mine
-                        ? "linear-gradient(135deg, #fff9ee 0%, #ffffff 65%)"
-                        : "#ffffff",
-                    boxShadow: mine
-                      ? "0 3px 10px -2px rgba(138,85,39,0.2)"
-                      : "0 3px 10px -2px rgba(120,100,70,0.14)",
-                    borderLeft: mine ? "3px solid #c68a52" : "3px solid transparent",
-                  }}
-                  className={`max-w-[85%] px-4 py-2.5 text-[15.5px] text-[#2e2a22] transition-transform duration-150 hover:-translate-y-px ${
-                    mine ? "rounded-[20px] rounded-br-md" : "rounded-[20px] rounded-bl-md"
-                  } ${m.deleted ? "italic opacity-60" : ""}`}
-                >
-                  <p className="whitespace-pre-wrap wrap-break-word leading-relaxed">
-                    {m.deleted ? "This message was deleted" : m.text}
-                  </p>
-                  <div className="flex items-center justify-end gap-0.5 mt-0.5">
-                    <span className="text-[11px] text-[#a39a89]">
-                      {formatTime(m.createdAt)}
+            {groupedByDay.map((item) => {
+              if (item.type === "separator") {
+                return (
+                  <div key={item.key} className="flex items-center justify-center my-4">
+                    <span className="px-3.5 py-1 rounded-full bg-white/70 backdrop-blur-sm text-[12px] font-medium text-[#6b6257] shadow-sm border border-[#e9ddc4]/50">
+                      {item.label}
                     </span>
-                    {tickStatus && (
-                      <span className="text-[#a39a89]">
-                        <TickIcon status={tickStatus} />
+                  </div>
+                );
+              }
+
+              const m = item.message;
+              const mine = m.sender === meId;
+              const tickStatus = mine && !m.deleted ? getTickStatus(m, progress, meId) : null;
+
+              return (
+                <div key={item.key} className={`flex ${mine ? "justify-end" : "justify-start"} mb-1`}>
+                  <div
+                    onContextMenu={(e) => openContextMenu(e, m._id, mine, m.deleted)}
+                    onTouchStart={(e) => startLongPress(e, m._id, mine, m.deleted)}
+                    onTouchEnd={cancelLongPress}
+                    onTouchMove={cancelLongPress}
+                    onTouchCancel={cancelLongPress}
+                    style={{
+                      animation: "messagePop 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.1)",
+                      background: m.deleted
+                        ? "#f1ece0"
+                        : mine
+                          ? "linear-gradient(135deg, #fff9ee 0%, #ffffff 65%)"
+                          : "#ffffff",
+                      boxShadow: mine
+                        ? "0 3px 10px -2px rgba(138,85,39,0.2)"
+                        : "0 3px 10px -2px rgba(120,100,70,0.14)",
+                      borderLeft: mine ? "3px solid #c68a52" : "3px solid transparent",
+                    }}
+                    className={`max-w-[85%] px-4 py-2.5 text-[15.5px] text-[#2e2a22] transition-transform duration-150 hover:-translate-y-px ${
+                      mine ? "rounded-[20px] rounded-br-md" : "rounded-[20px] rounded-bl-md"
+                    } ${m.deleted ? "italic opacity-60" : ""}`}
+                  >
+                    <p className="whitespace-pre-wrap wrap-break-word leading-relaxed">
+                      {m.deleted ? "This message was deleted" : m.text}
+                    </p>
+                    <div className="flex items-center justify-end gap-0.5 mt-0.5">
+                      <span className="text-[11px] text-[#a39a89]">
+                        {formatTime(m.createdAt)}
                       </span>
-                    )}
+                      {tickStatus && (
+                        <span className="text-[#a39a89]">
+                          <TickIcon status={tickStatus} />
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
 
-          {otherTyping && (
-            <div className="flex justify-start mb-1">
-              <div className="bg-white rounded-[20px] rounded-bl-md px-4 py-3 shadow-[0_3px_10px_-2px_rgba(120,100,70,0.14)]">
-                <TypingDots />
+            {otherTyping && (
+              <div className="flex justify-start mb-1">
+                <div className="bg-white rounded-[20px] rounded-bl-md px-4 py-3 shadow-[0_3px_10px_-2px_rgba(120,100,70,0.14)]">
+                  <TypingDots />
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       </div>
 

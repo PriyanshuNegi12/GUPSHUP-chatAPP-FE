@@ -19,6 +19,7 @@ let pendingCandidates = [];
 let callId = null;       // guards against events from a stale/previous call
 let ringTimer = null;
 let callStartedAt = null;
+let activePeerId = null; // who we're in a call with (set on start/accept) so logout can hang up
 
 const listeners = new Set();
 function emit(event) {
@@ -53,6 +54,7 @@ function resetPeer() {
   pendingCandidates = [];
   callId = null;
   callStartedAt = null;
+  activePeerId = null;
 }
 
 function createPeerConnection(peerUserId, thisCallId) {
@@ -74,13 +76,8 @@ function createPeerConnection(peerUserId, thisCallId) {
       callStartedAt = callStartedAt || Date.now();
       emit({ type: 'state', status: 'connected' });
     } else if (['failed', 'closed'].includes(conn.connectionState)) {
-      // FIX: this used to only tell the UI to reset — the peer connection,
-      // camera/mic and the server's callpeer record were never actually
-      // torn down, so both users could get stuck "already-in-call" for up
-      // to 4 hours. The component now calls endCall() in response to this.
       emit({ type: 'connection-lost' });
     } else if (conn.connectionState === 'disconnected') {
-      // brief blips are normal — don't treat as lost yet, just surface it
       emit({ type: 'state', status: 'reconnecting' });
     }
   };
@@ -97,8 +94,6 @@ async function getMedia(callType) {
     return await navigator.mediaDevices.getUserMedia(constraints);
   } catch (err) {
     if (callType === 'video') {
-      // camera denied/unavailable — fall back to audio-only rather than
-      // failing the call outright
       try {
         const audioOnly = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
         emit({ type: 'downgraded-to-audio' });
@@ -116,19 +111,18 @@ export function isInCall() {
 }
 
 export async function startCall({ peerUserId, conversationId, callType, peerInfo }) {
-  if (pc) return; // already in/starting a call — ignore double taps
+  if (pc) return;
 
   const socket = getSocket();
   const thisCallId = newCallId();
+  activePeerId = peerUserId; // FIX: was never assigned
 
-  // Show the call screen immediately, before touching the camera/mic, so
-  // the tap feels instant instead of waiting on a permission prompt.
   emit({ type: 'state', status: 'initiating', peerUserId, peerInfo, callType, conversationId });
 
   const online = await new Promise((resolve) => {
     socket.emit('checkOnline', peerUserId, (res) => resolve(res?.online ?? true));
   });
-  if (callId !== thisCallId) return; // cancelled while we were checking
+  if (callId !== thisCallId) return;
   if (!online) {
     emit({ type: 'call-failed', reason: 'offline' });
     resetPeer();
@@ -179,11 +173,8 @@ export async function acceptIncomingCall(incoming) {
   const socket = getSocket();
   const thisCallId = incoming.callId || newCallId();
   callId = thisCallId;
+  activePeerId = incoming.fromUserId; // FIX: was never assigned
 
-  // Candidates from the caller can arrive while we're still on the ringing
-  // screen (pc is null, so they land in pendingCandidates). Grab that
-  // array now and flush THIS copy after setRemoteDescription — otherwise
-  // early candidates are silently dropped and ICE never connects.
   const queuedCandidates = pendingCandidates;
   pendingCandidates = [];
 
@@ -253,6 +244,23 @@ export function endCall(peerUserId) {
   emit(wasConnected ? { type: 'state', status: 'ended', duration } : { type: 'state', status: 'idle' });
 }
 
+// Called on logout: notifies the peer, stops camera/mic, closes the peer
+// connection and sends the UI straight back to idle (no "call ended" screen).
+// Safe to call when there is no call — it does nothing.
+export function hangUpOnLogout() {
+  const peer = activePeerId;
+  const hadCall = pc !== null || localStream !== null || callId !== null;
+  if (peer) {
+    try {
+      getSocket().emit('call:end', { toUserId: peer });
+    } catch {
+      /* socket already gone — server should end the call on disconnect */
+    }
+  }
+  resetPeer();
+  if (hadCall) emit({ type: 'state', status: 'idle' });
+}
+
 export function handleRemoteEnded() {
   const wasConnected = !!callStartedAt;
   const duration = wasConnected ? Math.round((Date.now() - callStartedAt) / 1000) : 0;
@@ -264,25 +272,20 @@ export function handleRemoteEnded() {
   }
 }
 
-// -------- in-call controls --------
-
 export function toggleMute() {
   const track = localStream?.getAudioTracks()[0];
   if (!track) return false;
   track.enabled = !track.enabled;
-  return !track.enabled; // returns isMuted
+  return !track.enabled;
 }
 
 export function toggleCamera() {
   const track = localStream?.getVideoTracks()[0];
   if (!track) return false;
   track.enabled = !track.enabled;
-  return !track.enabled; // returns isCameraOff
+  return !track.enabled;
 }
 
-// Speaker/earpiece output switching. Only Chrome/Android (and desktop
-// Chrome/Edge) support HTMLMediaElement.setSinkId — iOS Safari does not,
-// so the UI should hide the toggle when this returns false.
 export function speakerToggleSupported() {
   return typeof HTMLMediaElement !== 'undefined' && 'setSinkId' in HTMLMediaElement.prototype;
 }
