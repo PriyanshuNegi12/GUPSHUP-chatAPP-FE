@@ -246,12 +246,17 @@ export function rejectIncomingCall(incoming) {
 export async function handleRemoteAnswer(answer) {
   if (!pc) return;
   clearRingTimer();
+
+  // Emit "connecting" BEFORE setRemoteDescription — applying the answer
+  // triggers `ontrack`, which fires `markConnected()`. If we emit "connecting"
+  // after, it overwrites the "connected" status and the timer never starts.
+  emit({ type: 'state', status: 'connecting' });
+
   await pc.setRemoteDescription(new RTCSessionDescription(answer));
   for (const c of pendingCandidates) {
     await pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
   }
   pendingCandidates = [];
-  emit({ type: 'state', status: 'connecting' });
 }
 
 export async function handleRemoteIceCandidate(candidate) {
