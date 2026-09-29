@@ -126,6 +126,7 @@ export default function ChatWindow() {
   const inputRef = useRef(null);
   const isNearBottomRef = useRef(true);
   const prevScrollHeightRef = useRef(null); // used to keep position when older messages are prepended
+  const rootRef = useRef(null);
 
   const messages = bucket?.items || [];
   const hasMore = bucket?.hasMore ?? true;
@@ -141,6 +142,28 @@ export default function ChatWindow() {
     ? blockedList.some((b) => b._id === conversation.user._id)
     : false;
   const cannotSend = conversation?.canSend === false;
+
+  // Pin the chat to the *visual* viewport on phones. Without this the mobile
+  // keyboard shrinks the visual viewport and the browser scrolls the page up
+  // to reveal the input, which pushes the header off-screen while typing.
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 767px)");
+    if (!mq.matches) return;
+
+    const vv = window.visualViewport;
+    const el = rootRef.current;
+    if (!vv || !el) return;
+
+    const apply = () => {
+      el.style.height = `${vv.height}px`;
+    };
+    apply();
+    vv.addEventListener("resize", apply);
+    return () => {
+      vv.removeEventListener("resize", apply);
+      el.style.height = "";
+    };
+  }, []);
 
   useEffect(() => {
     if (!conversationId) return;
@@ -395,7 +418,7 @@ export default function ChatWindow() {
   });
 
   return (
-    <div className="flex flex-col h-full min-h-0 w-full relative">
+    <div ref={rootRef} className="flex flex-col h-full min-h-0 w-full relative overflow-hidden">
       <style>{`
         @keyframes typingBounce {
           0%, 70%, 100% { transform: translateY(0)    scale(0.9);  opacity: 0.35; }
@@ -546,7 +569,6 @@ export default function ChatWindow() {
       </div>
 
       {/* ---------- messages ---------- */}
-      {/* Outer wrapper: bounded height + background + fixed blobs. The scroller sits on top. */}
       <div
         className="relative flex-1 min-h-0"
         style={{
@@ -554,7 +576,6 @@ export default function ChatWindow() {
             "radial-gradient(circle at 1px 1px, rgba(138,85,39,0.05) 1px, transparent 0) 0 0/22px 22px, linear-gradient(180deg, #f6efdd 0%, #f3ead8 100%)",
         }}
       >
-        {/* Blobs: sibling of the scroller, so they stay fixed while messages scroll */}
         <div className="pointer-events-none absolute inset-0 overflow-hidden z-0" aria-hidden="true">
           <div
             className="absolute w-96 h-96 rounded-full opacity-[0.32] blur-3xl"
@@ -582,7 +603,6 @@ export default function ChatWindow() {
           />
         </div>
 
-        {/* Scroller: NO justify-end (that clips older messages). Inner wrapper uses mt-auto instead. */}
         <div
           ref={scrollRef}
           onScroll={handleScroll}

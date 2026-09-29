@@ -47,6 +47,12 @@ export default function CallManager() {
   const localVideoRef = useCallback((node) => setLocalVideoNode(node), []);
   const remoteVideoRef = useCallback((node) => setRemoteVideoNode(node), []);
 
+  // Are we on a phone-sized screen? Drives earpiece/speaker button visibility
+  // and the "audio calls start on earpiece" default.
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches
+  );
+
   const timerRef = useRef(null);
   // Plain refs mirror the latest state so socket callbacks registered in the
   // mount-only effect below never read stale values.
@@ -58,6 +64,13 @@ export default function CallManager() {
   useEffect(() => { statusRef.current = status; }, [status]);
   useEffect(() => { peerUserIdRef.current = peerUserId; }, [peerUserId]);
   useEffect(() => { incomingRef.current = incoming; }, [incoming]);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 767px)");
+    const onChange = (e) => setIsMobile(e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
 
   const resetLocal = () => {
     setStatus("idle");
@@ -317,6 +330,15 @@ export default function CallManager() {
     return () => clearInterval(timerRef.current);
   }, [status]);
 
+  // On phones, audio calls default to earpiece (speaker OFF). Video calls keep
+  // speaker on (that's what people expect). resetLocal() already seeds
+  // speakerOn=false, this just guards against callType arriving after status.
+  useEffect(() => {
+    if (!isMobile) return;
+    const active = ["initiating", "ringing-outgoing", "connecting", "connected", "reconnecting"].includes(status);
+    if (active && callType === "audio") setSpeakerOn(false);
+  }, [isMobile, status, callType]);
+
   useEffect(() => {
     if (status !== "failed") return;
     const t = setTimeout(() => resetLocal(), 3500);
@@ -325,7 +347,7 @@ export default function CallManager() {
 
   useEffect(() => {
     if (status !== "ended") return;
-    const t = setTimeout(() => resetLocal(), 6000);
+    const t = setTimeout(() => resetLocal(), 4000);
     return () => clearTimeout(t);
   }, [status]);
 
@@ -354,7 +376,9 @@ export default function CallManager() {
   const handleToggleSpeaker = async () => {
     const next = !speakerOn;
     const ok = await callManager.setAudioOutput(remoteVideoNode, next);
-    if (ok) setSpeakerOn(next);
+    // setSinkId isn't supported on most mobile browsers, so always reflect
+    // the user's choice there and let the platform handle the routing.
+    if (ok || isMobile) setSpeakerOn(next);
   };
 
   const inCallUI = ["initiating", "ringing-outgoing", "connecting", "connected", "reconnecting"].includes(status);
@@ -371,6 +395,14 @@ export default function CallManager() {
 
   return (
     <>
+      <style>{`
+        @keyframes callEndedIn {
+          0%   { opacity: 0; transform: translateY(18px) scale(0.94); }
+          60%  { opacity: 1; transform: translateY(-3px) scale(1.01); }
+          100% { opacity: 1; transform: translateY(0) scale(1); }
+        }
+      `}</style>
+
       {showOverlay && (
         <div className="fixed inset-0 z-50 bg-black flex items-center justify-center">
           {status === "ringing-incoming" && (
@@ -429,25 +461,78 @@ export default function CallManager() {
           )}
 
           {status === "ended" && (
-            <div className="bg-[#faf5e9] rounded-[28px] p-8 w-80 text-center shadow-2xl">
-              {peerInfo?.avatar ? (
-                <img src={peerInfo.avatar} alt="" className="w-20 h-20 rounded-full object-cover mx-auto mb-4" />
-              ) : (
-                <span
-                  className="w-20 h-20 rounded-full mx-auto mb-4 flex items-center justify-center text-2xl text-white font-medium"
-                  style={{ background: "linear-gradient(160deg,#b97a45,#8a5527)" }}
+            <div
+              className="relative w-82.5 rounded-4xl px-7 pt-9 pb-7 text-center overflow-hidden"
+              style={{
+                background: "linear-gradient(170deg, #fefaf1 0%, #faf5e9 45%, #f1e6cf 100%)",
+                boxShadow:
+                  "0 36px 70px -24px rgba(50,32,10,0.65), inset 0 1px 0 rgba(255,255,255,0.85)",
+                animation: "callEndedIn 0.45s cubic-bezier(0.18, 0.9, 0.28, 1.2)",
+              }}
+            >
+              {/* soft warm glows */}
+              <div
+                className="pointer-events-none absolute -top-20 -right-12 w-48 h-48 rounded-full opacity-50 blur-3xl"
+                style={{ background: "radial-gradient(circle, #d4a86a, transparent 70%)" }}
+              />
+              <div
+                className="pointer-events-none absolute -bottom-24 -left-14 w-52 h-52 rounded-full opacity-40 blur-3xl"
+                style={{ background: "radial-gradient(circle, #e2c290, transparent 70%)" }}
+              />
+
+              <div className="relative">
+                <div className="relative inline-block mb-4">
+                  {peerInfo?.avatar ? (
+                    <img
+                      src={peerInfo.avatar}
+                      alt=""
+                      className="w-24 h-24 rounded-full object-cover ring-4 ring-white/85 shadow-[0_10px_30px_-10px_rgba(90,60,20,0.5)]"
+                    />
+                  ) : (
+                    <span
+                      className="w-24 h-24 rounded-full flex items-center justify-center text-[32px] text-white font-medium ring-4 ring-white/85 shadow-[0_10px_30px_-10px_rgba(90,60,20,0.5)]"
+                      style={{ background: "linear-gradient(160deg,#b97a45,#8a5527)" }}
+                    >
+                      {displayName[0]?.toUpperCase()}
+                    </span>
+                  )}
+
+                  {/* small “call ended” badge */}
+                  <span
+                    className="absolute -bottom-1 -right-1 w-9 h-9 rounded-full flex items-center justify-center text-white shadow-md ring-[3px] ring-[#faf5e9]"
+                    style={{ background: "linear-gradient(150deg,#d76a6a,#b23c3c)" }}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34A19.79 19.79 0 0 1 2.11 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91" />
+                      <line x1="23" y1="1" x2="1" y2="23" />
+                    </svg>
+                  </span>
+                </div>
+
+                <p className="font-display text-[19px] text-[#2e2a22] leading-tight">{displayName}</p>
+                <p className="text-[12.5px] text-[#8a8072] mt-0.5 mb-4">
+                  {callType === "video" ? "Video call ended" : "Voice call ended"}
+                </p>
+
+                <div className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-white/75 border border-[#e9ddc4] text-[13px] text-[#8a5527] font-medium mb-6 shadow-sm">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10" />
+                    <polyline points="12 6 12 12 16 14" />
+                  </svg>
+                  {formatDuration(endedDuration)}
+                </div>
+
+                <button
+                  onClick={resetLocal}
+                  className="w-full py-3 rounded-full text-white text-[14.5px] font-medium tracking-wide transition-transform duration-150 hover:scale-[1.015] active:scale-[0.97]"
+                  style={{
+                    background: "linear-gradient(155deg, #c68a52 0%, #8a5527 100%)",
+                    boxShadow: "0 10px 22px -8px rgba(138,85,39,0.65)",
+                  }}
                 >
-                  {displayName[0]?.toUpperCase()}
-                </span>
-              )}
-              <p className="font-display text-[18px] text-[#2e2a22] mb-1">{displayName}</p>
-              <p className="text-[13px] text-[#6b6257] mb-6">Call ended · {formatDuration(endedDuration)}</p>
-              <button
-                onClick={resetLocal}
-                className="px-6 py-2 rounded-full bg-[#8a5527] text-white text-[13.5px] font-medium hover:opacity-90"
-              >
-                Back
-              </button>
+                  Done
+                </button>
+              </div>
             </div>
           )}
 
@@ -537,7 +622,8 @@ export default function CallManager() {
                     {cameraOff ? "📷" : "🎥"}
                   </button>
                 )}
-                {callManager.speakerToggleSupported() && (
+                {/* Earpiece/speaker toggle — phones only. Desktop uses system audio routing. */}
+                {isMobile && (
                   <button
                     onClick={handleToggleSpeaker}
                     aria-label={speakerOn ? "Switch to earpiece" : "Switch to speaker"}
