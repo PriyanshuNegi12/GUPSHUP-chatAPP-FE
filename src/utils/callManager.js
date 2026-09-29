@@ -21,6 +21,11 @@ let ringTimer = null;
 let callStartedAt = null;
 let activePeerId = null; // who we're in a call with (set on start/accept) so logout can hang up
 
+// Set by createPeerConnection() so handleRemoteAnswer() can force-fire the
+// "connected" transition as a fallback (some desktop browsers don't reliably
+// fire ontrack / connection-state changes on the outgoing caller).
+let markConnectedFn = null;
+
 const listeners = new Set();
 function emit(event) {
   listeners.forEach((fn) => fn(event));
@@ -56,6 +61,7 @@ function resetPeer() {
   callId = null;
   callStartedAt = null;
   activePeerId = null;
+  markConnectedFn = null;
 }
 
 function createPeerConnection(peerUserId, thisCallId) {
@@ -72,6 +78,9 @@ function createPeerConnection(peerUserId, thisCallId) {
     callStartedAt = callStartedAt || Date.now();
     emit({ type: 'state', status: 'connected' });
   };
+
+  // Expose to handleRemoteAnswer so it can force-connect as a fallback.
+  markConnectedFn = markConnected;
 
   conn.onicecandidate = (e) => {
     if (e.candidate && callId === thisCallId) {
@@ -257,6 +266,14 @@ export async function handleRemoteAnswer(answer) {
     await pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
   }
   pendingCandidates = [];
+
+  // Fallback: on some desktop browsers (Windows Chrome) the caller's peer
+  // connection doesn't reliably fire `ontrack` or a connection-state change
+  // even though media is flowing. The answer is applied and candidates are
+  // queued, so force the "connected" transition here. The one-shot guard
+  // inside markConnected() makes this safe — if a real event already fired
+  // it, this call does nothing.
+  if (markConnectedFn) markConnectedFn();
 }
 
 export async function handleRemoteIceCandidate(candidate) {
