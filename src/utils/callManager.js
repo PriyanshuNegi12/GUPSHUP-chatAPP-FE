@@ -46,6 +46,7 @@ function resetPeer() {
     pc.onicecandidate = null;
     pc.ontrack = null;
     pc.onconnectionstatechange = null;
+    pc.oniceconnectionstatechange = null;
     pc.close();
   }
   pc = null;
@@ -61,24 +62,49 @@ function createPeerConnection(peerUserId, thisCallId) {
   const socket = getSocket();
   const conn = new RTCPeerConnection(ICE_SERVERS);
 
+  // Only fire "connected" once per call. Desktop Chrome can leave
+  // `connectionState` at "connecting" indefinitely on audio-only calls, so we
+  // also listen to iceConnectionState and ontrack — whichever fires first wins.
+  let connectedEmitted = false;
+  const markConnected = () => {
+    if (connectedEmitted || callId !== thisCallId) return;
+    connectedEmitted = true;
+    callStartedAt = callStartedAt || Date.now();
+    emit({ type: 'state', status: 'connected' });
+  };
+
   conn.onicecandidate = (e) => {
     if (e.candidate && callId === thisCallId) {
       socket.emit('call:ice-candidate', { toUserId: peerUserId, candidate: e.candidate });
     }
   };
+
   conn.ontrack = (e) => {
     if (callId !== thisCallId) return;
     emit({ type: 'remote-stream', stream: e.streams[0] });
+    // Remote media arrived — the call is definitely up.
+    markConnected();
   };
+
   conn.onconnectionstatechange = () => {
     if (callId !== thisCallId) return;
     if (conn.connectionState === 'connected') {
-      callStartedAt = callStartedAt || Date.now();
-      emit({ type: 'state', status: 'connected' });
+      markConnected();
     } else if (['failed', 'closed'].includes(conn.connectionState)) {
       emit({ type: 'connection-lost' });
     } else if (conn.connectionState === 'disconnected') {
       emit({ type: 'state', status: 'reconnecting' });
+    }
+  };
+
+  // Chrome/Safari fire this more reliably than connectionState for audio-only.
+  conn.oniceconnectionstatechange = () => {
+    if (callId !== thisCallId) return;
+    const s = conn.iceConnectionState;
+    if (s === 'connected' || s === 'completed') {
+      markConnected();
+    } else if (s === 'failed') {
+      emit({ type: 'connection-lost' });
     }
   };
 
@@ -115,7 +141,7 @@ export async function startCall({ peerUserId, conversationId, callType, peerInfo
 
   const socket = getSocket();
   const thisCallId = newCallId();
-  activePeerId = peerUserId; // FIX: was never assigned
+  activePeerId = peerUserId;
 
   emit({ type: 'state', status: 'initiating', peerUserId, peerInfo, callType, conversationId });
 
@@ -173,7 +199,7 @@ export async function acceptIncomingCall(incoming) {
   const socket = getSocket();
   const thisCallId = incoming.callId || newCallId();
   callId = thisCallId;
-  activePeerId = incoming.fromUserId; // FIX: was never assigned
+  activePeerId = incoming.fromUserId;
 
   const queuedCandidates = pendingCandidates;
   pendingCandidates = [];
@@ -244,9 +270,6 @@ export function endCall(peerUserId) {
   emit(wasConnected ? { type: 'state', status: 'ended', duration } : { type: 'state', status: 'idle' });
 }
 
-// Called on logout: notifies the peer, stops camera/mic, closes the peer
-// connection and sends the UI straight back to idle (no "call ended" screen).
-// Safe to call when there is no call — it does nothing.
 export function hangUpOnLogout() {
   const peer = activePeerId;
   const hadCall = pc !== null || localStream !== null || callId !== null;
