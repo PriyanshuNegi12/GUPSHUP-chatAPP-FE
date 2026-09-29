@@ -8,35 +8,47 @@ function formatDuration(s) {
   return `${m}:${sec}`;
 }
 
+const FAIL_MESSAGES = {
+  offline: "They're offline right now.",
+  busy: "They're on another call right now.",
+  "already-in-call": "They're on another call right now.",
+  "not-friends": "You can only call friends.",
+  permission: "Camera/microphone access was denied.",
+  "no-answer": "No answer.",
+};
+
 export default function CallManager() {
-  const [status, setStatus] = useState("idle"); // idle | ringing-incoming | calling | connected
+  // idle | initiating | ringing-outgoing | ringing-incoming | connecting |
+  // connected | reconnecting | ended | failed
+  const [status, setStatus] = useState("idle");
   const [callType, setCallType] = useState("video");
   const [peerInfo, setPeerInfo] = useState(null);
   const [peerUserId, setPeerUserId] = useState(null);
   const [incoming, setIncoming] = useState(null);
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
+  const [speakerOn, setSpeakerOn] = useState(false);
   const [duration, setDuration] = useState(0);
-  const [error, setError] = useState("");
+  const [endedDuration, setEndedDuration] = useState(0);
+  const [failReason, setFailReason] = useState("");
+  const [note, setNote] = useState("");
 
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
   const [swapped, setSwapped] = useState(false); // false: remote big / local PiP
 
-  // FIX: DOM nodes are tracked in state via callback refs instead of
-  // useRef. A plain useRef doesn't trigger a re-render when the node
-  // mounts, so an attach-effect keyed off a ref object can only run when
-  // something ELSE happens to re-render the component — there's no
-  // guarantee that coincides with the stream arriving. Callback refs make
-  // "the node exists" a real, observable value, so the effect below has
-  // real dependencies and fires the instant either the node or the stream
-  // shows up, whichever comes first.
   const [localVideoNode, setLocalVideoNode] = useState(null);
   const [remoteVideoNode, setRemoteVideoNode] = useState(null);
   const localVideoRef = useCallback((node) => setLocalVideoNode(node), []);
   const remoteVideoRef = useCallback((node) => setRemoteVideoNode(node), []);
 
   const timerRef = useRef(null);
+  // Plain refs mirror the latest state so socket callbacks registered in the
+  // mount-only effect below never read stale values.
+  const statusRef = useRef("idle");
+  const peerUserIdRef = useRef(null);
+  useEffect(() => { statusRef.current = status; }, [status]);
+  useEffect(() => { peerUserIdRef.current = peerUserId; }, [peerUserId]);
 
   const resetLocal = () => {
     setStatus("idle");
@@ -45,9 +57,12 @@ export default function CallManager() {
     setPeerUserId(null);
     setMuted(false);
     setCameraOff(false);
+    setSpeakerOn(false);
     setLocalStream(null);
     setRemoteStream(null);
     setSwapped(false);
+    setFailReason("");
+    setNote("");
   };
 
   // ---- signaling + call-manager event wiring ----
@@ -55,6 +70,11 @@ export default function CallManager() {
     const socket = getSocket();
 
     const onIncoming = (payload) => {
+      // don't let a second incoming call barge into one already in progress
+      if (statusRef.current !== "idle") {
+        socket.emit("call:reject", { toUserId: payload.fromUserId });
+        return;
+      }
       setIncoming(payload);
       setStatus("ringing-incoming");
       setCallType(payload.callType);
@@ -63,9 +83,23 @@ export default function CallManager() {
     };
     const onAnswer = (payload) => callManager.handleRemoteAnswer(payload.answer);
     const onIce = (payload) => callManager.handleRemoteIceCandidate(payload.candidate);
-    const onRejected = () => { callManager.handleRemoteEnded(); resetLocal(); };
-    const onEnded = () => { callManager.handleRemoteEnded(); resetLocal(); };
-    const onBusy = () => { callManager.handleRemoteEnded(); resetLocal(); setError("They're on another call right now."); };
+
+    // FIX: these now check the event is actually about the CURRENT call —
+    // a stale call:ended from a previous call could otherwise wipe out a
+    // call you've since started with someone else.
+    const onRejected = (payload) => {
+      if (payload?.fromUserId && payload.fromUserId !== peerUserIdRef.current) return;
+      callManager.handleRemoteEnded();
+    };
+    const onEnded = (payload) => {
+      if (payload?.fromUserId && payload.fromUserId !== peerUserIdRef.current) return;
+      callManager.handleRemoteEnded();
+    };
+    const onBusy = () => {
+      callManager.handleRemoteEnded();
+      setFailReason(FAIL_MESSAGES.busy);
+      setStatus("failed");
+    };
 
     socket.on("call:incoming", onIncoming);
     socket.on("call:answer", onAnswer);
@@ -76,24 +110,34 @@ export default function CallManager() {
 
     const unsubscribe = callManager.subscribe((event) => {
       if (event.type === "state") {
-        if (event.status) setStatus(event.status);
+        if (event.status === "idle") {
+          resetLocal();
+          return;
+        }
+        setStatus(event.status);
         if (event.peerInfo) setPeerInfo(event.peerInfo);
         if (event.peerUserId) setPeerUserId(event.peerUserId);
         if (event.callType) setCallType(event.callType);
+        if (event.status === "ended") setEndedDuration(event.duration || 0);
       } else if (event.type === "local-stream") {
         setLocalStream(event.stream);
       } else if (event.type === "remote-stream") {
         setRemoteStream(event.stream);
+      } else if (event.type === "downgraded-to-audio") {
+        setNote("Camera unavailable — continuing with audio only.");
       } else if (event.type === "call-failed") {
-        resetLocal();
-        setError(
-          event.reason === "offline" ? "They're offline right now." :
-          event.reason === "not-friends" ? "You can only call friends." :
-          event.reason === "permission" ? "Camera/microphone access was denied." :
-          "Couldn't start the call."
-        );
+        if (event.reason === "cancelled") {
+          // peer backed out before we ever connected — just close quietly
+          resetLocal();
+          return;
+        }
+        setFailReason(FAIL_MESSAGES[event.reason] || "Couldn't start the call.");
+        setStatus("failed");
       } else if (event.type === "connection-lost") {
-        resetLocal();
+        // FIX: this used to just reset local UI state, leaving the peer
+        // connection, camera/mic and the server's callpeer record alive.
+        // endCall() properly tears everything down and notifies the peer.
+        callManager.endCall(peerUserIdRef.current);
       }
     });
 
@@ -108,9 +152,7 @@ export default function CallManager() {
     };
   }, []);
 
-  // ---- stream <-> DOM reconciliation (the actual fix) ----
-  // Real dependency arrays now: this fires whenever the node mounts/unmounts
-  // OR whenever the stream changes — deterministically, regardless of order.
+  // ---- stream <-> DOM reconciliation ----
   useEffect(() => {
     if (!localVideoNode) return;
     if (localStream) {
@@ -148,10 +190,22 @@ export default function CallManager() {
   }, [status]);
 
   useEffect(() => {
-    if (!error) return;
-    const t = setTimeout(() => setError(""), 4000);
+    if (status !== "failed") return;
+    const t = setTimeout(() => resetLocal(), 3500);
     return () => clearTimeout(t);
-  }, [error]);
+  }, [status]);
+
+  useEffect(() => {
+    if (status !== "ended") return;
+    const t = setTimeout(() => resetLocal(), 6000);
+    return () => clearTimeout(t);
+  }, [status]);
+
+  useEffect(() => {
+    if (!note) return;
+    const t = setTimeout(() => setNote(""), 4000);
+    return () => clearTimeout(t);
+  }, [note]);
 
   const handleAccept = async () => {
     const payload = incoming;
@@ -164,24 +218,29 @@ export default function CallManager() {
   };
   const handleEnd = () => {
     callManager.endCall(peerUserId);
-    resetLocal();
   };
   const handleToggleMute = () => setMuted(callManager.toggleMute());
   const handleToggleCamera = () => setCameraOff(callManager.toggleCamera());
+  const handleToggleSpeaker = async () => {
+    const next = !speakerOn;
+    const ok = await callManager.setAudioOutput(remoteVideoNode, next);
+    if (ok) setSpeakerOn(next);
+  };
 
-  const inCallUI = status === "calling" || status === "connected";
+  const inCallUI = ["initiating", "ringing-outgoing", "connecting", "connected", "reconnecting"].includes(status);
   const showOverlay = status !== "idle";
   const showingVideo = inCallUI && callType === "video";
   const displayName = peerInfo?.firstname || peerInfo?.username || "Unknown";
 
+  const statusLabel =
+    status === "initiating" ? "Starting call…" :
+    status === "ringing-outgoing" ? "Calling…" :
+    status === "connecting" ? "Connecting…" :
+    status === "reconnecting" ? "Reconnecting…" :
+    formatDuration(duration);
+
   return (
     <>
-      {!showOverlay && error && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-100 bg-[#8a2f2f] text-white text-[13.5px] px-4 py-2.5 rounded-full shadow-lg">
-          {error}
-        </div>
-      )}
-
       {showOverlay && (
         <div className="fixed inset-0 z-50 bg-black flex items-center justify-center">
           {status === "ringing-incoming" && (
@@ -217,8 +276,59 @@ export default function CallManager() {
             </div>
           )}
 
+          {status === "failed" && (
+            <div className="bg-[#faf5e9] rounded-[28px] p-8 w-80 text-center shadow-2xl">
+              {peerInfo?.avatar ? (
+                <img src={peerInfo.avatar} alt="" className="w-20 h-20 rounded-full object-cover mx-auto mb-4" />
+              ) : displayName !== "Unknown" ? (
+                <span
+                  className="w-20 h-20 rounded-full mx-auto mb-4 flex items-center justify-center text-2xl text-white font-medium"
+                  style={{ background: "linear-gradient(160deg,#b97a45,#8a5527)" }}
+                >
+                  {displayName[0]?.toUpperCase()}
+                </span>
+              ) : null}
+              <p className="text-[15px] text-[#2e2a22] mb-6">{failReason}</p>
+              <button
+                onClick={resetLocal}
+                className="px-6 py-2 rounded-full bg-[#8a5527] text-white text-[13.5px] font-medium hover:opacity-90"
+              >
+                Close
+              </button>
+            </div>
+          )}
+
+          {status === "ended" && (
+            <div className="bg-[#faf5e9] rounded-[28px] p-8 w-80 text-center shadow-2xl">
+              {peerInfo?.avatar ? (
+                <img src={peerInfo.avatar} alt="" className="w-20 h-20 rounded-full object-cover mx-auto mb-4" />
+              ) : (
+                <span
+                  className="w-20 h-20 rounded-full mx-auto mb-4 flex items-center justify-center text-2xl text-white font-medium"
+                  style={{ background: "linear-gradient(160deg,#b97a45,#8a5527)" }}
+                >
+                  {displayName[0]?.toUpperCase()}
+                </span>
+              )}
+              <p className="font-display text-[18px] text-[#2e2a22] mb-1">{displayName}</p>
+              <p className="text-[13px] text-[#6b6257] mb-6">Call ended · {formatDuration(endedDuration)}</p>
+              <button
+                onClick={resetLocal}
+                className="px-6 py-2 rounded-full bg-[#8a5527] text-white text-[13.5px] font-medium hover:opacity-90"
+              >
+                Back
+              </button>
+            </div>
+          )}
+
           {inCallUI && (
             <div className="relative w-full h-full">
+              {note && (
+                <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 bg-black/60 text-white text-[12.5px] px-3.5 py-1.5 rounded-full">
+                  {note}
+                </div>
+              )}
+
               {showingVideo ? (
                 <video
                   ref={remoteVideoRef}
@@ -244,9 +354,7 @@ export default function CallManager() {
                     </span>
                   )}
                   <p className="font-display text-[22px] text-white mb-1">{displayName}</p>
-                  <p className="text-[13px] text-white/70">
-                    {status === "calling" ? "Calling..." : formatDuration(duration)}
-                  </p>
+                  <p className="text-[13px] text-white/70">{statusLabel}</p>
                 </div>
               )}
 
@@ -274,7 +382,7 @@ export default function CallManager() {
 
               {showingVideo && (
                 <div className="absolute top-4 left-4 bg-black/55 rounded-full px-3.5 py-1.5 text-white text-[13px] z-10">
-                  {displayName} · {status === "calling" ? "Calling..." : formatDuration(duration)}
+                  {displayName} · {statusLabel}
                 </div>
               )}
 
@@ -297,6 +405,17 @@ export default function CallManager() {
                     }`}
                   >
                     {cameraOff ? "📷" : "🎥"}
+                  </button>
+                )}
+                {callManager.speakerToggleSupported() && (
+                  <button
+                    onClick={handleToggleSpeaker}
+                    aria-label={speakerOn ? "Switch to earpiece" : "Switch to speaker"}
+                    className={`w-12 h-12 rounded-full flex items-center justify-center text-lg shadow-lg transition-colors duration-150 ${
+                      speakerOn ? "bg-white text-black" : "bg-white/25 text-white hover:bg-white/35"
+                    }`}
+                  >
+                    {speakerOn ? "🔊" : "📱"}
                   </button>
                 )}
                 <button

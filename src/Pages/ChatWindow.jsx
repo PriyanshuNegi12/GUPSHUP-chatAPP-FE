@@ -30,14 +30,6 @@ function formatDateLabel(dateStr) {
   return d.toLocaleDateString([], { day: "numeric", month: "short", year: d.getFullYear() !== today.getFullYear() ? "numeric" : undefined });
 }
 
-// FIX: `progress` includes a row for every member of the conversation,
-// including yourself. Your own lastReadAt gets bumped whenever YOU open
-// the chat, which happens before you send your next message — so right
-// after sending, your own progress row is older than that message's
-// createdAt, and `.every()` fails on your own row forever (not the
-// recipient's). That's why ticks only "fixed themselves" after a refresh:
-// remounting re-fires markRead and pushes your own timestamp past the
-// message. Ticks should only reflect what OTHER members have done.
 function getTickStatus(message, progress, meId) {
   const others = (progress || []).filter(
     (p) => String(p.user?._id || p.user) !== String(meId)
@@ -118,7 +110,7 @@ export default function ChatWindow() {
   );
 
   const onlineUserIds = useSelector((state) => state.friend.onlineUserIds);
-  const blockedList = useSelector((state) => state.friend.blocked); // NEW
+  const blockedList = useSelector((state) => state.friend.blocked);
   const typingMap = useSelector((state) => state.chat.typingByConversation?.[conversationId] || EMPTY_TYPING_MAP);
 
   const [text, setText] = useState("");
@@ -131,6 +123,8 @@ export default function ChatWindow() {
   const isTypingRef = useRef(false);
   const longPressTimerRef = useRef(null);
   const headerMenuRef = useRef(null);
+  const inputRef = useRef(null);
+  const isNearBottomRef = useRef(true);
 
   const messages = bucket?.items || [];
   const hasMore = bucket?.hasMore ?? true;
@@ -150,6 +144,9 @@ export default function ChatWindow() {
   useEffect(() => {
     if (!conversationId) return;
 
+    isNearBottomRef.current = true;
+    setShowScrollDown(false);
+
     dispatch(setActiveConversation(conversationId));
     dispatch(fetchMessages({ conversationId }));
     dispatch(markChatRead(conversationId));
@@ -157,6 +154,12 @@ export default function ChatWindow() {
     const socket = getSocket();
     socket.emit("joinChat", conversationId);
     socket.emit("markRead", conversationId);
+
+    const onReconnect = () => {
+      socket.emit("joinChat", conversationId);
+      socket.emit("markRead", conversationId);
+      dispatch(fetchMessages({ conversationId }));
+    };
 
     const onDelivered = (payload) => {
       if (payload.conversationId === conversationId) dispatch(applyDelivered(payload));
@@ -168,35 +171,32 @@ export default function ChatWindow() {
       if (payload.conversationId === conversationId) dispatch(applyReadByAll(payload));
     };
 
+    socket.on("connect", onReconnect);
     socket.on("delivered", onDelivered);
     socket.on("messagesRead", onMessagesRead);
     socket.on("readByAll", onReadByAll);
 
     return () => {
       socket.emit("leaveChat", conversationId);
+      socket.off("connect", onReconnect);
       socket.off("delivered", onDelivered);
       socket.off("messagesRead", onMessagesRead);
       socket.off("readByAll", onReadByAll);
+      dispatch(setActiveConversation(null));
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId]);
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [messages.length, otherTyping]);
-
-  useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const onScrollCheck = () => {
-      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-      setShowScrollDown(distanceFromBottom > 400);
-    };
-    el.addEventListener("scroll", onScrollCheck);
-    return () => el.removeEventListener("scroll", onScrollCheck);
-  }, [conversationId]);
+    const newest = messages[0];
+    const isOwnMessage = newest && newest.sender === meId;
+    if (isNearBottomRef.current || isOwnMessage) {
+      el.scrollTop = el.scrollHeight;
+      isNearBottomRef.current = true;
+    }
+  }, [messages.length, otherTyping]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -253,7 +253,11 @@ export default function ChatWindow() {
   };
 
   const handleScroll = (e) => {
-    if (e.target.scrollTop < 60) loadOlder();
+    const el = e.target;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    isNearBottomRef.current = distanceFromBottom < 120;
+    setShowScrollDown(distanceFromBottom > 400);
+    if (el.scrollTop < 60) loadOlder();
   };
 
   const scrollToBottom = () => {
@@ -298,6 +302,8 @@ export default function ChatWindow() {
           .catch(() => setText(trimmed));
       }
     });
+
+    inputRef.current?.focus();
   };
 
   const handleDelete = (messageId) => {
@@ -319,8 +325,8 @@ export default function ChatWindow() {
 
     const result = await dispatch(blockUser(conversation.user._id));
     if (blockUser.fulfilled.match(result)) {
-      dispatch(setDirectChatBlockState({ userId: conversation.user._id })); // flips canSend false instantly
-      dispatch(addBlockedLocally(conversation.user)); // blockedByMe is now derived from this list
+      dispatch(setDirectChatBlockState({ userId: conversation.user._id }));
+      dispatch(addBlockedLocally(conversation.user));
     }
   };
 
@@ -530,7 +536,7 @@ export default function ChatWindow() {
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto px-3 sm:px-6 py-5 flex flex-col-reverse relative"
+        className="flex-1 overflow-y-auto px-3 sm:px-6 py-5 flex flex-col justify-end relative"
         style={{
           background:
             "radial-gradient(circle at 1px 1px, rgba(138,85,39,0.05) 1px, transparent 0) 0 0/22px 22px, linear-gradient(180deg, #f6efdd 0%, #f3ead8 100%)",
@@ -575,7 +581,7 @@ export default function ChatWindow() {
             if (item.type === "separator") {
               return (
                 <div key={item.key} className="flex items-center justify-center my-4">
-                  <span className="px-3.5 py-1 rounded-full bg-white/70 backdrop-blur-sm text-[11.5px] font-medium text-[#6b6257] shadow-sm border border-[#e9ddc4]/50">
+                  <span className="px-3.5 py-1 rounded-full bg-white/70 backdrop-blur-sm text-[12px] font-medium text-[#6b6257] shadow-sm border border-[#e9ddc4]/50">
                     {item.label}
                   </span>
                 </div>
@@ -584,7 +590,6 @@ export default function ChatWindow() {
 
             const m = item.message;
             const mine = m.sender === meId;
-            // FIX: pass meId so getTickStatus can exclude our own progress row
             const tickStatus = mine && !m.deleted ? getTickStatus(m, progress, meId) : null;
 
             return (
@@ -597,21 +602,25 @@ export default function ChatWindow() {
                   onTouchCancel={cancelLongPress}
                   style={{
                     animation: "messagePop 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.1)",
-                    background: m.deleted ? "#f1ece0" : "#ffffff",
+                    background: m.deleted
+                      ? "#f1ece0"
+                      : mine
+                        ? "linear-gradient(135deg, #fff9ee 0%, #ffffff 65%)"
+                        : "#ffffff",
                     boxShadow: mine
-                      ? "0 2px 8px -2px rgba(138,85,39,0.18)"
-                      : "0 2px 8px -2px rgba(120,100,70,0.12)",
+                      ? "0 3px 10px -2px rgba(138,85,39,0.2)"
+                      : "0 3px 10px -2px rgba(120,100,70,0.14)",
                     borderLeft: mine ? "3px solid #c68a52" : "3px solid transparent",
                   }}
-                  className={`max-w-[85%] px-3.5 py-2 text-[14.5px] text-[#2e2a22] transition-transform duration-150 hover:-translate-y-px ${
-                    mine ? "rounded-[18px] rounded-br-md" : "rounded-[18px] rounded-bl-md"
+                  className={`max-w-[85%] px-4 py-2.5 text-[15.5px] text-[#2e2a22] transition-transform duration-150 hover:-translate-y-px ${
+                    mine ? "rounded-[20px] rounded-br-md" : "rounded-[20px] rounded-bl-md"
                   } ${m.deleted ? "italic opacity-60" : ""}`}
                 >
                   <p className="whitespace-pre-wrap wrap-break-word leading-relaxed">
                     {m.deleted ? "This message was deleted" : m.text}
                   </p>
                   <div className="flex items-center justify-end gap-0.5 mt-0.5">
-                    <span className="text-[10.5px] text-[#a39a89]">
+                    <span className="text-[11px] text-[#a39a89]">
                       {formatTime(m.createdAt)}
                     </span>
                     {tickStatus && (
@@ -627,7 +636,7 @@ export default function ChatWindow() {
 
           {otherTyping && (
             <div className="flex justify-start mb-1">
-              <div className="bg-white rounded-[18px] rounded-bl-md px-4 py-3 shadow-[0_2px_8px_-2px_rgba(120,100,70,0.12)]">
+              <div className="bg-white rounded-[20px] rounded-bl-md px-4 py-3 shadow-[0_3px_10px_-2px_rgba(120,100,70,0.14)]">
                 <TypingDots />
               </div>
             </div>
@@ -658,7 +667,7 @@ export default function ChatWindow() {
           className="flex items-end gap-2 px-3 sm:px-4 py-3 border-t border-[#e9ddc4] bg-[#faf5e9] shrink-0 relative z-10"
         >
           <div
-            className="flex-1 rounded-[22px] transition-all duration-200"
+            className="flex-1 rounded-[26px] transition-all duration-200"
             style={{
               boxShadow: inputFocused
                 ? "0 0 0 3px rgba(138,85,39,0.14), 0 2px 6px -2px rgba(138,85,39,0.15)"
@@ -666,20 +675,23 @@ export default function ChatWindow() {
             }}
           >
             <input
+              ref={inputRef}
               type="text"
               value={text}
               onChange={handleTextChange}
               onFocus={() => setInputFocused(true)}
               onBlur={() => setInputFocused(false)}
               placeholder="Type a message"
-              className="w-full h-12 px-5 rounded-[22px] border-[1.5px] outline-none text-[14.5px] text-[#3b2e22] placeholder:text-[#4a3d2e]/50 bg-white transition-colors duration-200"
+              className="w-full h-13 px-5 rounded-[26px] border-[1.5px] outline-none text-[15.5px] text-[#3b2e22] placeholder:text-[#4a3d2e]/50 bg-white transition-colors duration-200"
               style={{ borderColor: inputFocused ? "#8a5527" : "rgba(59,46,34,0.18)" }}
             />
           </div>
           <button
             type="submit"
             disabled={!text.trim()}
-            className="w-12 h-12 rounded-full flex items-center justify-center text-[#f3e8d6] disabled:opacity-45 transition-all duration-150 hover:scale-105 active:scale-90 disabled:hover:scale-100 shrink-0"
+            onMouseDown={(e) => e.preventDefault()}
+            onTouchStart={(e) => e.preventDefault()}
+            className="w-13 h-13 rounded-full flex items-center justify-center text-[#f3e8d6] disabled:opacity-45 transition-all duration-150 hover:scale-105 active:scale-90 disabled:hover:scale-100 shrink-0"
             style={{
               background: "linear-gradient(155deg, #c68a52 0%, #8a5527 100%)",
               boxShadow: text.trim() ? "0 4px 12px -3px rgba(138,85,39,0.5)" : "none",

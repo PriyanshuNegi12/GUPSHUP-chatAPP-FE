@@ -48,12 +48,19 @@ function App() {
 
     const socket = connectSocket();
 
-    socket.on("connect", () => {
+    // FIX: these were never removed in the cleanup below, so every time this
+    // effect re-ran (e.g. user._id changing) another pair got stacked on top
+    // of the last — harmless here beyond duplicate console logs, but worth
+    // keeping clean since other listeners in this effect follow the same
+    // pattern and DO matter (double dispatches, etc.).
+    const onConnect = () => {
       console.log("[socket] connected as:", user._id, "| socket id:", socket.id);
-    });
-    socket.on("connect_error", (err) => {
+    };
+    const onConnectError = (err) => {
       console.log("[socket] connect_error:", err.message);
-    });
+    };
+    socket.on("connect", onConnect);
+    socket.on("connect_error", onConnectError);
 
     const onNewMessage = (msg) => dispatch(receiveMessage(msg));
 
@@ -107,6 +114,8 @@ function App() {
     socket.on("group:removedFrom", onRemovedFrom);
 
     return () => {
+      socket.off("connect", onConnect);
+      socket.off("connect_error", onConnectError);
       socket.off("newMessage", onNewMessage);
       socket.off("chat:updated", onChatUpdated);
       socket.off("messageDeleted", onMessageDeleted);
