@@ -4,13 +4,15 @@ import { useDispatch, useSelector } from "react-redux";
 import {
   fetchMessages, setActiveConversation, receiveOwnMessage, markChatRead,
   applyDelivered, applyRead, applyReadByAll, leaveGroup, setDirectChatBlockState,
+  fetchChatList, fetchGroupMembers, addGroupMembers, // CHANGED: added these three
 } from "../utils/chatSlice";
-import { blockUser, unblockUser, addBlockedLocally } from "../utils/friendSlice";
+import { blockUser, unblockUser, addBlockedLocally, fetchFriends } from "../utils/friendSlice"; // CHANGED: fetchFriends added
 import { getSocket } from "../utils/socket";
 import axiosClient from "../utils/axiosClient";
 import * as callManager from "../utils/callManager";
 
 const EMPTY_TYPING_MAP = {};
+const MAX_GROUP_SIZE = 50;
 
 function formatTime(dateStr) {
   return new Date(dateStr).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -99,6 +101,93 @@ function BackArrowIcon({ size = 20 }) {
   );
 }
 
+// NEW: popup for the group creator to pick friends and add them to the group
+function AddMembersModal({ conversationId, members, friends, onClose }) {
+  const dispatch = useDispatch();
+  const [selected, setSelected] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const memberIds = new Set((members || []).map((m) => String(m.user._id)));
+  const candidates = friends.filter((f) => !memberIds.has(String(f._id)));
+  const slotsLeft = MAX_GROUP_SIZE - memberIds.size;
+
+  const toggle = (id) =>
+    setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : s.length < slotsLeft ? [...s, id] : s));
+
+  const handleAdd = async () => {
+    if (!selected.length || saving) return;
+    setSaving(true);
+    setError("");
+    const result = await dispatch(addGroupMembers({ conversationId, memberIds: selected }));
+    if (addGroupMembers.fulfilled.match(result)) {
+      dispatch(fetchGroupMembers(conversationId));
+      onClose();
+    } else {
+      setError(result.payload || "Could not add members");
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4" onClick={onClose}>
+      <div
+        className="w-full max-w-sm rounded-2xl bg-[#faf5e9] border border-[#e9ddc4] shadow-xl overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-4 py-3 border-b border-[#e9ddc4] font-semibold text-[15px] text-[#2e2a22]">
+          Add members
+        </div>
+
+        <div className="max-h-72 overflow-y-auto">
+          {candidates.length === 0 ? (
+            <p className="px-4 py-6 text-center text-[13.5px] text-[#6b6257]">
+              None of your friends are left to add.
+            </p>
+          ) : (
+            candidates.map((f) => (
+              <label
+                key={f._id}
+                className="flex items-center gap-3 px-4 py-2.5 hover:bg-[#f3ead8] cursor-pointer"
+              >
+                <input
+                  type="checkbox"
+                  checked={selected.includes(f._id)}
+                  onChange={() => toggle(f._id)}
+                  className="accent-[#8a5527] w-4 h-4"
+                />
+                {f.avatar ? (
+                  <img src={f.avatar} alt="" className="w-8 h-8 rounded-full object-cover" />
+                ) : (
+                  <span className="w-8 h-8 rounded-full flex items-center justify-center text-[13px] text-[#f3e8d6] bg-[#8a5527]">
+                    {(f.username?.[0] || "?").toUpperCase()}
+                  </span>
+                )}
+                <span className="text-[14px] text-[#2e2a22]">{f.username}</span>
+              </label>
+            ))
+          )}
+        </div>
+
+        {error && <p className="px-4 py-2 text-[13px] text-[#8a2f2f]">{error}</p>}
+
+        <div className="flex justify-end gap-2 px-4 py-3 border-t border-[#e9ddc4]">
+          <button onClick={onClose} className="px-4 py-1.5 rounded-full text-[13.5px] text-[#3b2e22] hover:bg-[#efe4cd]">
+            Cancel
+          </button>
+          <button
+            onClick={handleAdd}
+            disabled={!selected.length || saving}
+            className="px-4 py-1.5 rounded-full text-[13.5px] bg-[#8a5527] text-[#f3e8d6] disabled:opacity-45"
+          >
+            {saving ? "Adding..." : `Add${selected.length ? ` (${selected.length})` : ""}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ChatWindow() {
   const { conversationId } = useParams();
   const dispatch = useDispatch();
@@ -113,11 +202,16 @@ export default function ChatWindow() {
   const blockedList = useSelector((state) => state.friend.blocked);
   const typingMap = useSelector((state) => state.chat.typingByConversation?.[conversationId] || EMPTY_TYPING_MAP);
 
+  // CHANGED: needed for the "Add members" feature
+  const members = useSelector((state) => state.chat.membersByConversation[conversationId]);
+  const friends = useSelector((state) => state.friend.friends);
+
   const [text, setText] = useState("");
   const [contextMenu, setContextMenu] = useState(null);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [showScrollDown, setShowScrollDown] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
+  const [addOpen, setAddOpen] = useState(false); // CHANGED
   const scrollRef = useRef(null);
   const stopTypingTimerRef = useRef(null);
   const isTypingRef = useRef(false);
@@ -142,6 +236,11 @@ export default function ChatWindow() {
     ? blockedList.some((b) => b._id === conversation.user._id)
     : false;
   const cannotSend = conversation?.canSend === false;
+
+  // CHANGED: only the group creator sees "Add members"
+  const isCreator =
+    conversation?.type === "group" &&
+    !!members?.some((m) => String(m.user._id) === String(meId) && m.role === "creator");
 
   // Pin the chat to the *visual* viewport on phones. Without this the mobile
   // keyboard shrinks the visual viewport and the browser scrolls the page up
@@ -211,6 +310,11 @@ export default function ChatWindow() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId]);
+
+  // CHANGED: load the member list for groups so we know who the creator is
+  useEffect(() => {
+    if (conversation?.type === "group") dispatch(fetchGroupMembers(conversationId));
+  }, [conversationId, conversation?.type, dispatch]);
 
   // After older messages are prepended, restore the scroll position so the view doesn't jump.
   useLayoutEffect(() => {
@@ -354,6 +458,7 @@ export default function ChatWindow() {
     if (leaveGroup.fulfilled.match(result)) navigate("/");
   };
 
+  // CHANGED: shows an error if the server rejects the block
   const handleBlockUser = async () => {
     setHeaderMenuOpen(false);
     if (!conversation?.user?._id) return;
@@ -363,14 +468,22 @@ export default function ChatWindow() {
     if (blockUser.fulfilled.match(result)) {
       dispatch(setDirectChatBlockState({ userId: conversation.user._id }));
       dispatch(addBlockedLocally(conversation.user));
+    } else {
+      window.alert(result.payload || "Could not block user");
     }
   };
 
+  // CHANGED: refetches the chat list after unblocking and shows an error on failure
   const handleUnblockUser = async () => {
     setHeaderMenuOpen(false);
     if (!conversation?.user?._id) return;
 
-    await dispatch(unblockUser(conversation.user._id));
+    const result = await dispatch(unblockUser(conversation.user._id));
+    if (unblockUser.fulfilled.match(result)) {
+      dispatch(fetchChatList());
+    } else {
+      window.alert(result.payload || "Could not unblock user");
+    }
   };
 
   const handleVoiceCall = () => {
@@ -455,8 +568,9 @@ export default function ChatWindow() {
       `}</style>
 
       {/* ---------- header ---------- */}
+      {/* CHANGED: z-10 -> z-30 so the dropdown menu is not covered by the messages layer */}
       <div
-        className="flex items-center gap-3 px-3 sm:px-4 h-17 border-b border-[#e9ddc4] shrink-0 backdrop-blur-sm relative z-10"
+        className="flex items-center gap-3 px-3 sm:px-4 h-17 border-b border-[#e9ddc4] shrink-0 backdrop-blur-sm relative z-30"
         style={{
           background: "linear-gradient(180deg, rgba(251,247,236,0.97) 0%, rgba(250,245,233,0.97) 100%)",
           boxShadow: "0 1px 0 rgba(138,85,39,0.06)",
@@ -542,12 +656,27 @@ export default function ChatWindow() {
               style={{ animation: "messagePop 0.15s ease-out" }}
             >
               {conversation.type === "group" ? (
-                <button
-                  onClick={handleLeaveGroup}
-                  className="block w-full text-left px-4 py-2.5 text-[14px] text-[#8a2f2f] hover:bg-[#f3ead8] transition-colors duration-150"
-                >
-                  Leave group
-                </button>
+                <>
+                  {/* CHANGED: new "Add members" item, visible only to the group creator */}
+                  {isCreator && (
+                    <button
+                      onClick={() => {
+                        setHeaderMenuOpen(false);
+                        dispatch(fetchFriends());
+                        setAddOpen(true);
+                      }}
+                      className="block w-full text-left px-4 py-2.5 text-[14px] text-[#3b2e22] hover:bg-[#f3ead8] transition-colors duration-150"
+                    >
+                      Add members
+                    </button>
+                  )}
+                  <button
+                    onClick={handleLeaveGroup}
+                    className="block w-full text-left px-4 py-2.5 text-[14px] text-[#8a2f2f] hover:bg-[#f3ead8] transition-colors duration-150"
+                  >
+                    Leave group
+                  </button>
+                </>
               ) : blockedByMe ? (
                 <button
                   onClick={handleUnblockUser}
@@ -703,9 +832,18 @@ export default function ChatWindow() {
 
       {/* ---------- input ---------- */}
       {cannotSend ? (
-        <div className="flex items-center justify-center gap-2 px-4 py-4 border-t border-[#e9ddc4] bg-[#faf5e9] text-[13.5px] text-[#8a2f2f] shrink-0">
+        /* CHANGED: footer now has an Unblock button, and different text when you're just not friends */
+        <div className="flex items-center justify-center gap-3 px-4 py-4 border-t border-[#e9ddc4] bg-[#faf5e9] text-[13.5px] text-[#8a2f2f] shrink-0">
           <span>🚫</span>
-          {blockedByMe ? "You have blocked this user" : "You can't send messages in this chat"}
+          {blockedByMe ? "You have blocked this user" : "You're not friends, so you can't send messages"}
+          {blockedByMe && (
+            <button
+              onClick={handleUnblockUser}
+              className="ml-1 px-3 py-1 rounded-full bg-[#8a5527] text-[#f3e8d6] text-[12.5px] hover:bg-[#744520] transition-colors"
+            >
+              Unblock
+            </button>
+          )}
         </div>
       ) : (
         <form
@@ -768,6 +906,16 @@ export default function ChatWindow() {
             🗑 Delete message
           </button>
         </div>
+      )}
+
+      {/* CHANGED: Add members popup */}
+      {addOpen && (
+        <AddMembersModal
+          conversationId={conversationId}
+          members={members}
+          friends={friends}
+          onClose={() => setAddOpen(false)}
+        />
       )}
     </div>
   );

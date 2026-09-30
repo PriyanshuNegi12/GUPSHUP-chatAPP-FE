@@ -5,9 +5,10 @@ import { checkAuth, fetchProfile } from "./utils/authSlice";
 import {
   fetchChatList, receiveMessage, chatUpdated, messageDeleted,
   setTyping, clearTyping, removedFromGroup, setMeId, resetChatState,
+  fetchGroupMembers, // CHANGED: added
 } from "./utils/chatSlice";
 import {
-  fetchFriends, fetchReceivedRequests, fetchSentRequests,
+  fetchFriends, fetchReceivedRequests, fetchSentRequests, fetchBlocked, // CHANGED: fetchBlocked added
   setOnlineList, setUserOnline, setUserOffline,
 } from "./utils/friendSlice";
 import { connectSocket, disconnectSocket, getSocket } from "./utils/socket";
@@ -44,15 +45,11 @@ function App() {
 
     dispatch(setMeId(user._id));
     dispatch(fetchChatList());
+    dispatch(fetchBlocked()); // CHANGED: without this the blocked list is empty after a refresh, so "Unblock" disappears
     dispatch(fetchProfile()); // fills in avatar/bio/age/etc. app-wide, not just on the profile page
 
     const socket = connectSocket();
 
-    // FIX: these were never removed in the cleanup below, so every time this
-    // effect re-ran (e.g. user._id changing) another pair got stacked on top
-    // of the last — harmless here beyond duplicate console logs, but worth
-    // keeping clean since other listeners in this effect follow the same
-    // pattern and DO matter (double dispatches, etc.).
     const onConnect = () => {
       console.log("[socket] connected as:", user._id, "| socket id:", socket.id);
     };
@@ -82,12 +79,15 @@ function App() {
       dispatch(fetchReceivedRequests());
       dispatch(fetchSentRequests());
       dispatch(fetchFriends());
+      dispatch(fetchBlocked()); // CHANGED
       // friend status changes (accept/block/unblock/remove) all affect
-      // whether a direct chat's canSend is true — without this, a stale
-      // canSend:false from an earlier block sticks around forever, even
-      // after you're friends again, until a full page refresh
+      // whether a direct chat's canSend is true
       dispatch(fetchChatList());
     };
+
+    // CHANGED: people added to a group now see it live, and member lists stay fresh
+    const onChatNew = () => dispatch(fetchChatList());
+    const onGroupChanged = ({ conversationId }) => dispatch(fetchGroupMembers(conversationId));
 
     const onPresenceInitial = (payload) => dispatch(setOnlineList(payload.onlineUserIds));
     const onPresenceOnline = (payload) => dispatch(setUserOnline(payload));
@@ -112,6 +112,10 @@ function App() {
     socket.on("typing", onTyping);
     socket.on("stopTyping", onStopTyping);
     socket.on("group:removedFrom", onRemovedFrom);
+    socket.on("chat:new", onChatNew);                     // CHANGED
+    socket.on("group:membersAdded", onGroupChanged);      // CHANGED
+    socket.on("group:memberLeft", onGroupChanged);        // CHANGED
+    socket.on("group:memberRemoved", onGroupChanged);     // CHANGED
 
     return () => {
       socket.off("connect", onConnect);
@@ -130,6 +134,10 @@ function App() {
       socket.off("typing", onTyping);
       socket.off("stopTyping", onStopTyping);
       socket.off("group:removedFrom", onRemovedFrom);
+      socket.off("chat:new", onChatNew);                  // CHANGED
+      socket.off("group:membersAdded", onGroupChanged);   // CHANGED
+      socket.off("group:memberLeft", onGroupChanged);     // CHANGED
+      socket.off("group:memberRemoved", onGroupChanged);  // CHANGED
     };
   }, [isAuthenticated, user?._id, dispatch]);
 

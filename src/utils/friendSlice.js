@@ -1,5 +1,6 @@
 import { createAsyncThunk, createSlice } from '@reduxjs/toolkit';
 import axiosClient from './axiosClient';
+import { fetchChatList } from './chatSlice'; // CHANGED: needed by unfriendUser
 
 export const fetchFriends = createAsyncThunk(
   'friend/fetchFriends',
@@ -97,11 +98,14 @@ export const cancelFriendRequest = createAsyncThunk(
   }
 );
 
+// CHANGED: refetches the chat list after unfriending so the direct chat's
+// canSend flips to false immediately on your own screen.
 export const unfriendUser = createAsyncThunk(
   'friend/unfriend',
-  async (userId, { rejectWithValue }) => {
+  async (userId, { rejectWithValue, dispatch }) => {
     try {
       await axiosClient.delete(`/friend/remove/${userId}`);
+      dispatch(fetchChatList());
       return userId;
     } catch (err) {
       return rejectWithValue(err.response?.data?.message || err.message);
@@ -181,10 +185,8 @@ const friendSlice = createSlice({
       if (lastSeenAt) state.lastSeenById[userId] = lastSeenAt;
     },
 
-    // NEW: optimistically add a user to the blocked list right after a
+    // Optimistically add a user to the blocked list right after a
     // successful block, instead of waiting on a fetchBlocked() round trip.
-    // Needs the full person object (we already have it locally — either from
-    // the friends list or from conversation.user).
     addBlockedLocally(state, action) {
       const person = action.payload;
       if (!person?._id) return;
@@ -245,6 +247,6 @@ export const {
   setOnlineList,
   setUserOnline,
   setUserOffline,
-  addBlockedLocally, // NEW
+  addBlockedLocally,
 } = friendSlice.actions;
 export default friendSlice.reducer;
