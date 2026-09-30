@@ -6,6 +6,7 @@ import {
   fetchChatList, receiveMessage, chatUpdated, messageDeleted,
   setTyping, clearTyping, removedFromGroup, setMeId, resetChatState,
   fetchGroupMembers, // CHANGED: added
+  groupUpdated,      // NEW
 } from "./utils/chatSlice";
 import {
   fetchFriends, fetchReceivedRequests, fetchSentRequests, fetchBlocked, // CHANGED: fetchBlocked added
@@ -88,6 +89,7 @@ function App() {
     // CHANGED: people added to a group now see it live, and member lists stay fresh
     const onChatNew = () => dispatch(fetchChatList());
     const onGroupChanged = ({ conversationId }) => dispatch(fetchGroupMembers(conversationId));
+    const onGroupUpdated = (payload) => dispatch(groupUpdated(payload)); // NEW: group name/avatar changed
 
     const onPresenceInitial = (payload) => dispatch(setOnlineList(payload.onlineUserIds));
     const onPresenceOnline = (payload) => dispatch(setUserOnline(payload));
@@ -116,6 +118,7 @@ function App() {
     socket.on("group:membersAdded", onGroupChanged);      // CHANGED
     socket.on("group:memberLeft", onGroupChanged);        // CHANGED
     socket.on("group:memberRemoved", onGroupChanged);     // CHANGED
+    socket.on("group:updated", onGroupUpdated);           // NEW
 
     return () => {
       socket.off("connect", onConnect);
@@ -138,6 +141,7 @@ function App() {
       socket.off("group:membersAdded", onGroupChanged);   // CHANGED
       socket.off("group:memberLeft", onGroupChanged);     // CHANGED
       socket.off("group:memberRemoved", onGroupChanged);  // CHANGED
+      socket.off("group:updated", onGroupUpdated);        // NEW
     };
   }, [isAuthenticated, user?._id, dispatch]);
 

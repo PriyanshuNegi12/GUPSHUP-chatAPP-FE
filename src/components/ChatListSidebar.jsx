@@ -29,7 +29,8 @@ function SearchIcon({ size = 15 }) {
 
 function ChatRow({ chat, isTyping, isOnline }) {
   const title = chat.type === "group" ? chat.name : chat.user?.username || "Unknown";
-  const avatar = chat.type === "group" ? null : chat.user?.avatar;
+  // CHANGED: groups can now have their own avatar
+  const avatar = chat.type === "group" ? chat.avatar : chat.user?.avatar;
   const preview = isTyping
     ? "typing..."
     : chat.lastMessage

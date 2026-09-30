@@ -5,10 +5,12 @@ import {
   fetchMessages, setActiveConversation, receiveOwnMessage, markChatRead,
   applyDelivered, applyRead, applyReadByAll, leaveGroup, setDirectChatBlockState,
   fetchChatList, fetchGroupMembers, addGroupMembers, // CHANGED: added these three
+  updateGroup, removeGroupMember, // NEW: group info panel
 } from "../utils/chatSlice";
 import { blockUser, unblockUser, addBlockedLocally, fetchFriends } from "../utils/friendSlice"; // CHANGED: fetchFriends added
 import { getSocket } from "../utils/socket";
 import axiosClient from "../utils/axiosClient";
+import { imageToDataUrl } from "../utils/imageToDataUrl"; // NEW
 import * as callManager from "../utils/callManager";
 
 const EMPTY_TYPING_MAP = {};
@@ -188,6 +190,207 @@ function AddMembersModal({ conversationId, members, friends, onClose }) {
   );
 }
 
+// NEW: group details popup — avatar, name, creator, created date, members.
+// The creator can change the avatar/name and remove members.
+function GroupInfoModal({ conversation, members, meId, isCreator, onClose, onAddMembers, onLeave }) {
+  const dispatch = useDispatch();
+  const fileInputRef = useRef(null);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState(conversation.name || "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const creator = members?.find((m) => m.role === "creator");
+  const sortedMembers = [...(members || [])].sort((a, b) => (a.role === "creator" ? -1 : b.role === "creator" ? 1 : 0));
+  const createdLabel = conversation.createdAt
+    ? new Date(conversation.createdAt).toLocaleDateString([], { day: "numeric", month: "long", year: "numeric" })
+    : null;
+
+  const handleAvatarPick = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setError("");
+    setBusy(true);
+    try {
+      const dataUrl = await imageToDataUrl(file, { size: 128, quality: 0.8 });
+      const result = await dispatch(updateGroup({ conversationId: conversation._id, avatar: dataUrl }));
+      if (!updateGroup.fulfilled.match(result)) setError(result.payload || "Could not update the group picture");
+    } catch (err) {
+      setError(err.message || "Could not process that image");
+    }
+    setBusy(false);
+  };
+
+  const handleRemoveAvatar = async () => {
+    setError("");
+    setBusy(true);
+    const result = await dispatch(updateGroup({ conversationId: conversation._id, avatar: null }));
+    if (!updateGroup.fulfilled.match(result)) setError(result.payload || "Could not remove the picture");
+    setBusy(false);
+  };
+
+  const handleSaveName = async () => {
+    const trimmed = nameDraft.trim();
+    if (!trimmed || trimmed.length > 50) {
+      setError("Group name must be 1 to 50 characters");
+      return;
+    }
+    if (trimmed === conversation.name) {
+      setEditingName(false);
+      return;
+    }
+    setError("");
+    setBusy(true);
+    const result = await dispatch(updateGroup({ conversationId: conversation._id, name: trimmed }));
+    if (updateGroup.fulfilled.match(result)) setEditingName(false);
+    else setError(result.payload || "Could not rename the group");
+    setBusy(false);
+  };
+
+  const handleRemoveMember = async (m) => {
+    if (!window.confirm(`Remove ${m.user.username} from the group?`)) return;
+    setError("");
+    const result = await dispatch(removeGroupMember({ conversationId: conversation._id, userId: m.user._id }));
+    if (!removeGroupMember.fulfilled.match(result)) setError(result.payload || "Could not remove member");
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4" onClick={onClose}>
+      <div
+        className="w-full max-w-sm max-h-[85vh] overflow-y-auto rounded-2xl bg-[#faf5e9] border border-[#e9ddc4] shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* avatar + name */}
+        <div className="flex flex-col items-center px-5 pt-6 pb-4 border-b border-[#e9ddc4]">
+          <div className="relative">
+            {conversation.avatar ? (
+              <img src={conversation.avatar} alt="" className="w-24 h-24 rounded-full object-cover" />
+            ) : (
+              <span
+                className="w-24 h-24 rounded-full flex items-center justify-center text-[36px]"
+                style={{ background: "linear-gradient(160deg, #8a7a5e, #4a463e)" }}
+              >
+                👥
+              </span>
+            )}
+            {isCreator && (
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={busy}
+                aria-label="Change group picture"
+                className="absolute bottom-0 right-0 w-8 h-8 rounded-full flex items-center justify-center text-[#f3e8d6] border-2 border-[#faf5e9] text-[14px] disabled:opacity-60"
+                style={{ background: "linear-gradient(180deg, #b97a45 0%, #8a5527 100%)" }}
+              >
+                📷
+              </button>
+            )}
+            <input ref={fileInputRef} type="file" accept="image/*" onChange={handleAvatarPick} className="hidden" />
+          </div>
+
+          {isCreator && conversation.avatar && (
+            <button onClick={handleRemoveAvatar} disabled={busy} className="mt-2 text-[12px] text-[#8a2f2f] hover:underline disabled:opacity-60">
+              Remove picture
+            </button>
+          )}
+
+          {editingName ? (
+            <div className="flex items-center gap-2 mt-3 w-full">
+              <input
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                maxLength={50}
+                autoFocus
+                className="flex-1 h-10 px-4 rounded-full border-[1.5px] border-[#3b2e22]/30 bg-white outline-none text-[14px] text-[#3b2e22]"
+              />
+              <button onClick={handleSaveName} disabled={busy} className="px-3 h-10 rounded-full bg-[#8a5527] text-[#f3e8d6] text-[13px] disabled:opacity-60">
+                Save
+              </button>
+              <button
+                onClick={() => { setEditingName(false); setNameDraft(conversation.name || ""); setError(""); }}
+                className="px-3 h-10 rounded-full text-[13px] text-[#3b2e22] hover:bg-[#efe4cd]"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 mt-3">
+              <h2 className="text-[18px] font-semibold text-[#2e2a22] text-center wrap-break-word">{conversation.name}</h2>
+              {isCreator && (
+                <button
+                  onClick={() => { setNameDraft(conversation.name || ""); setEditingName(true); }}
+                  aria-label="Edit group name"
+                  className="text-[14px] hover:scale-110 transition-transform"
+                >
+                  ✏️
+                </button>
+              )}
+            </div>
+          )}
+
+          <p className="text-[12.5px] text-[#8a8072] mt-1">Group · {members?.length ?? 0} members</p>
+          {(createdLabel || creator) && (
+            <p className="text-[12px] text-[#8a8072] mt-0.5 text-center">
+              Created{createdLabel ? ` on ${createdLabel}` : ""}{creator ? ` by ${creator.user.username}` : ""}
+            </p>
+          )}
+        </div>
+
+        {error && <p className="px-5 pt-3 text-[13px] text-[#8a2f2f]">{error}</p>}
+
+        {/* members */}
+        <div className="py-2">
+          <div className="flex items-center justify-between px-5 py-2">
+            <span className="text-[12.5px] font-medium text-[#6b6257]">Members</span>
+            {isCreator && (
+              <button onClick={onAddMembers} className="text-[13px] text-[#8a5527] font-medium hover:underline">
+                + Add members
+              </button>
+            )}
+          </div>
+
+          {sortedMembers.map((m) => {
+            const isMe = String(m.user._id) === String(meId);
+            const isAdmin = m.role === "creator";
+            return (
+              <div key={m.user._id} className="flex items-center gap-3 px-5 py-2">
+                {m.user.avatar ? (
+                  <img src={m.user.avatar} alt="" className="w-9 h-9 rounded-full object-cover" />
+                ) : (
+                  <span className="w-9 h-9 rounded-full flex items-center justify-center text-[14px] text-[#f3e8d6] bg-[#8a5527]">
+                    {(m.user.username?.[0] || "?").toUpperCase()}
+                  </span>
+                )}
+                <span className="flex-1 min-w-0 truncate text-[14px] text-[#2e2a22]">
+                  {m.user.username}{isMe ? " (You)" : ""}
+                </span>
+                {isAdmin && (
+                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-[#efe4cd] text-[#8a5527] font-medium">Admin</span>
+                )}
+                {isCreator && !isMe && (
+                  <button onClick={() => handleRemoveMember(m)} className="text-[12px] text-[#8a2f2f] hover:underline">
+                    Remove
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="flex items-center justify-between gap-2 px-5 py-3 border-t border-[#e9ddc4]">
+          <button onClick={onLeave} className="text-[13.5px] text-[#8a2f2f] hover:underline">
+            Leave group
+          </button>
+          <button onClick={onClose} className="px-4 py-1.5 rounded-full text-[13.5px] bg-[#efe4cd] text-[#3b2e22] hover:bg-[#e9ddc4]">
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ChatWindow() {
   const { conversationId } = useParams();
   const dispatch = useDispatch();
@@ -212,6 +415,7 @@ export default function ChatWindow() {
   const [showScrollDown, setShowScrollDown] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
   const [addOpen, setAddOpen] = useState(false); // CHANGED
+  const [infoOpen, setInfoOpen] = useState(false); // NEW: group details popup
   const scrollRef = useRef(null);
   const stopTypingTimerRef = useRef(null);
   const isTypingRef = useRef(false);
@@ -516,7 +720,7 @@ export default function ChatWindow() {
   }
 
   const title = conversation.type === "group" ? conversation.name : conversation.user?.username;
-  const headerAvatar = conversation.type === "direct" ? conversation.user?.avatar : null;
+  const headerAvatar = conversation.type === "direct" ? conversation.user?.avatar : conversation.avatar; // CHANGED: groups have avatars now
 
   const orderedMessages = [...messages].reverse();
   const groupedByDay = [];
@@ -584,6 +788,11 @@ export default function ChatWindow() {
           <BackArrowIcon />
         </button>
 
+        {/* NEW: for groups, clicking the avatar/name opens the group details popup */}
+        <div
+          className={`flex items-center gap-3 flex-1 min-w-0 ${conversation.type === "group" ? "cursor-pointer" : ""}`}
+          onClick={() => conversation.type === "group" && setInfoOpen(true)}
+        >
         <div className="relative shrink-0">
           {headerAvatar ? (
             <img
@@ -617,9 +826,10 @@ export default function ChatWindow() {
                 {otherOnline ? "Online" : "Offline"}
               </span>
             ) : (
-              <span className="text-[#8a8072]">Group</span>
+              <span className="text-[#8a8072]">Group · tap for info</span>
             )}
           </p>
+        </div>
         </div>
 
         {conversation.type === "direct" && !cannotSend && (
@@ -657,6 +867,12 @@ export default function ChatWindow() {
             >
               {conversation.type === "group" ? (
                 <>
+                  <button
+                    onClick={() => { setHeaderMenuOpen(false); setInfoOpen(true); }}
+                    className="block w-full text-left px-4 py-2.5 text-[14px] text-[#3b2e22] hover:bg-[#f3ead8] transition-colors duration-150"
+                  >
+                    Group info
+                  </button>
                   {/* CHANGED: new "Add members" item, visible only to the group creator */}
                   {isCreator && (
                     <button
@@ -906,6 +1122,26 @@ export default function ChatWindow() {
             🗑 Delete message
           </button>
         </div>
+      )}
+
+      {/* NEW: group details popup */}
+      {infoOpen && conversation.type === "group" && (
+        <GroupInfoModal
+          conversation={conversation}
+          members={members}
+          meId={meId}
+          isCreator={isCreator}
+          onClose={() => setInfoOpen(false)}
+          onAddMembers={() => {
+            setInfoOpen(false);
+            dispatch(fetchFriends());
+            setAddOpen(true);
+          }}
+          onLeave={() => {
+            setInfoOpen(false);
+            handleLeaveGroup();
+          }}
+        />
       )}
 
       {/* CHANGED: Add members popup */}

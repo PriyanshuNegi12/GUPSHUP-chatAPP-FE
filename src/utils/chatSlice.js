@@ -53,6 +53,22 @@ export const createGroup = createAsyncThunk(
   }
 );
 
+// NEW: creator edits the group's name and/or avatar (avatar: data URL, or null to remove)
+export const updateGroup = createAsyncThunk(
+  'chat/updateGroup',
+  async ({ conversationId, name, avatar }, { rejectWithValue }) => {
+    try {
+      const body = {};
+      if (name !== undefined) body.name = name;
+      if (avatar !== undefined) body.avatar = avatar;
+      const { data } = await axiosClient.patch(`/chat/group/${conversationId}`, body);
+      return { conversationId, name: data.group.name, avatar: data.group.avatar };
+    } catch (err) {
+      return rejectWithValue(err.response?.data?.message || err.message);
+    }
+  }
+);
+
 export const markChatRead = createAsyncThunk(
   'chat/markRead',
   async (conversationId, { rejectWithValue }) => {
@@ -269,6 +285,15 @@ const chatSlice = createSlice({
       removeConversationLocally(state, action.payload.conversationId);
     },
 
+    // NEW: applies a group name/avatar change (from the socket "group:updated" event)
+    groupUpdated(state, action) {
+      const { conversationId, name, avatar } = action.payload;
+      const conv = state.conversations.find((c) => c._id === conversationId);
+      if (!conv) return;
+      conv.name = name;
+      conv.avatar = avatar || null;
+    },
+
     setDirectChatBlockState(state, action) {
       const { userId } = action.payload;
       const conv = state.conversations.find((c) => c.type === 'direct' && c.user?._id === userId);
@@ -331,7 +356,7 @@ const chatSlice = createSlice({
             user: action.payload.user,
             lastMessage: null,
             unread: 0,
-            canSend: true,
+            canSend: action.payload.canSend ?? true,
             updatedAt: new Date().toISOString(),
           });
         }
@@ -343,11 +368,21 @@ const chatSlice = createSlice({
           _id: conversation._id,
           type: 'group',
           name: conversation.name,
+          avatar: null,
+          createdAt: conversation.createdAt,
           lastMessage: null,
           unread: 0,
           canSend: true,
           updatedAt: new Date().toISOString(),
         });
+      })
+
+      .addCase(updateGroup.fulfilled, (state, action) => {
+        const { conversationId, name, avatar } = action.payload;
+        const conv = state.conversations.find((c) => c._id === conversationId);
+        if (!conv) return;
+        conv.name = name;
+        conv.avatar = avatar || null;
       })
 
       .addCase(markChatRead.fulfilled, (state, action) => {
@@ -388,7 +423,8 @@ export const {
   setTyping,
   clearTyping,
   removedFromGroup,
-  setDirectChatBlockState, // NEW
+  groupUpdated, // NEW
+  setDirectChatBlockState,
   setMeId,
   resetChatState,
 } = chatSlice.actions;
